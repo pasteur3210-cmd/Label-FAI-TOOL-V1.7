@@ -1,0 +1,269 @@
+{
+  "profile_name": "GRG-4297u-TSL-P1 - Inner Box Label",
+  "profile_version": "1.7.2",
+  "label_type": "Inner Box Label",
+  "source_spec": "680010-353 GRG-4297u-TSL-P1 738125-00X Inner Box Label Request Form V3.0 (2025/11/03)",
+  "model": "GRG-4297u",
+  "label_pn": "680010-353",
+  "blank_label_pn": "502109-180",
+  "spec_version": "V3.0",
+  "fixed_fields": {
+    "model": "GRG-4297u"
+  },
+  "rules": {
+    "sn_regex": "\\d{2}[1-9A-C]4297UF-[A-Z0-9]{2}\\d{6}",
+    "sn_display": "YYM4297UF-FFXXXXXX (same rule as Chassis Label)",
+    "pn_regex": "738125-00\\d",
+    "pn_display": "738125-00X",
+    "mac_regex": "[0-9A-F]{12}",
+    "gpon_prefix": "434D5444",
+    "gpon_regex": "434D5444[0-9A-F]{8}",
+    "made_in_allowed": [
+      "China",
+      "Taiwan"
+    ],
+    "barcode_type_required": "Code128",
+    "barcode_checking_code": "1"
+  },
+  "image_quality": {
+    "min_sharpness": 55,
+    "min_brightness": 45,
+    "max_brightness": 235,
+    "min_contrast": 22
+  },
+  "notes": [
+    "Profile created from Inner Box Label Request Form V3.0.",
+    "P/N is work-order dependent and validated with pattern 738125-00X plus exact work-order comparison when provided.",
+    "S/N, MAC and GPON S/N use the same value rules as the Chassis Label.",
+    "S/N, MAC and GPON S/N human-readable text must match their decoded barcodes.",
+    "DoC link is fixed text and is validated by tolerant OCR similarity.",
+    "Made in China/Taiwan is work-order dependent.",
+    "The Label Example on page 2 is registered as the Golden Artwork source.",
+    "V1.7.2 Artwork Check judges symbol shape and position relative to the Golden Label Example.",
+    "Artwork printed size is intentionally NOT judged. Multi-scale search is recognition tolerance only.",
+    "For position judgment the whole Inner Box Label must be visible so the label can be normalized."
+  ],
+  "artwork_verification": {
+    "status": "ENABLED_SHAPE_POSITION",
+    "enabled": true,
+    "blocking": true,
+    "mode": "shape_position",
+    "golden_source": "Source spec page 2 - Label Example",
+    "judged_dimensions": {
+      "category_presence": true,
+      "shape": true,
+      "position": true,
+      "size": false,
+      "spacing": false
+    },
+    "symbols": [
+      {
+        "id": "comtrend_logo",
+        "name": "COMTREND Logo",
+        "item": "Artwork: COMTREND Logo",
+        "required": true,
+        "template": "grg4297u_inner_box/comtrend_logo.png",
+        "presence_threshold": 0.58,
+        "shape_threshold": 0.48,
+        "detect_scales": [
+          0.35,
+          0.45,
+          0.55,
+          0.65,
+          0.75,
+          0.9,
+          1.0,
+          1.15,
+          1.35,
+          1.6,
+          1.9,
+          2.2
+        ]
+      },
+      {
+        "id": "recycling_mark",
+        "name": "Recycling Mark",
+        "item": "Artwork: Recycling Mark",
+        "required": true,
+        "template": "grg4297u_inner_box/recycling_mark.png",
+        "presence_threshold": 0.58,
+        "shape_threshold": 0.58,
+        "detect_scales": [
+          0.35,
+          0.45,
+          0.55,
+          0.65,
+          0.75,
+          0.9,
+          1.0,
+          1.15,
+          1.35,
+          1.6,
+          1.9,
+          2.2
+        ]
+      },
+      {
+        "id": "ce_mark",
+        "name": "CE Mark",
+        "item": "Artwork: CE Mark",
+        "required": true,
+        "template": "grg4297u_inner_box/ce_mark.png",
+        "presence_threshold": 0.6,
+        "shape_threshold": 0.6,
+        "detect_scales": [
+          0.35,
+          0.45,
+          0.55,
+          0.65,
+          0.75,
+          0.9,
+          1.0,
+          1.15,
+          1.35,
+          1.6,
+          1.9,
+          2.2
+        ]
+      },
+      {
+        "id": "weee_mark",
+        "name": "WEEE crossed-out wheeled bin",
+        "item": "Artwork: WEEE Mark",
+        "required": true,
+        "template": "grg4297u_inner_box/weee_mark.png",
+        "presence_threshold": 0.56,
+        "shape_threshold": 0.56,
+        "detect_scales": [
+          0.35,
+          0.45,
+          0.55,
+          0.65,
+          0.75,
+          0.9,
+          1.0,
+          1.15,
+          1.35,
+          1.6,
+          1.9,
+          2.2
+        ]
+      }
+    ],
+    "golden_layout": "grg4297u_inner_box/golden_layout.png",
+    "require_label_alignment": true,
+    "position_tolerance": [
+      0.12,
+      0.12
+    ]
+  },
+  "live": {
+    "required_items": [
+      "Fixed: GPON VoIP Gateway",
+      "Fixed: model",
+      "Variable: P/N Format",
+      "Variable: S/N Human Readable Format",
+      "Variable: S/N Barcode Format",
+      "Consistency: S/N Text vs Barcode",
+      "Variable: MAC Human Readable Format",
+      "Variable: MAC Barcode Format",
+      "Consistency: MAC Text vs Barcode",
+      "Variable: GPON S/N Human Readable Format",
+      "Variable: GPON S/N Barcode Format",
+      "Consistency: GPON S/N Text vs Barcode",
+      "Rule: GPON S/N = Prefix + MAC Last 8",
+      "Fixed: DoC Link",
+      "Variable: Made in Format",
+      "Artwork: COMTREND Logo",
+      "Artwork: Recycling Mark",
+      "Artwork: CE Mark",
+      "Artwork: WEEE Mark"
+    ],
+    "pass_confirmations": 2,
+    "fail_confirmations": 3,
+    "candidate_ttl_sec": 12,
+    "camera_width": 1280,
+    "camera_height": 720,
+    "preview_interval_ms": 50,
+    "guided_min_sharpness": 18,
+    "zone_scan_interval_ms": 500,
+    "machine_scan_interval_ms": 250,
+    "latest_frame_only": true,
+    "skip_locked_items": true,
+    "worker_snapshot_isolation": true,
+    "worker_result_transport": "thread_safe_queue",
+    "custom_targets": [
+      {
+        "item": "Fixed: DoC Link",
+        "title": "DoC Link",
+        "instruction": "請將完整 DoC link 放入掃描區域。",
+        "target_rect": [
+          0.08,
+          0.36,
+          0.92,
+          0.64
+        ],
+        "mode": "fuzzy",
+        "expected": "http://download.comtrend.com/DoC/GRG-4297u-TSL.html",
+        "threshold": 0.72
+      }
+    ],
+    "production_zones": [
+      {
+        "id": "A",
+        "title": "ZONE A - Basic Information",
+        "instruction": "請將左上基本資訊完整放入黃色區域：GPON VoIP Gateway / Model / P/N。",
+        "target_rect": [
+          0.05,
+          0.08,
+          0.58,
+          0.48
+        ],
+        "items": [
+          "Fixed: GPON VoIP Gateway",
+          "Fixed: model",
+          "Variable: P/N Format"
+        ]
+      },
+      {
+        "id": "B",
+        "title": "ZONE B - Device Identity",
+        "instruction": "請將 S/N / MAC / GPON S/N 文字與條碼區域完整放入黃色區域。三個 Code128 仍由 Full-frame Reader 獨立掃描。",
+        "target_rect": [
+          0.38,
+          0.08,
+          0.96,
+          0.66
+        ],
+        "items": [
+          "Variable: S/N Human Readable Format",
+          "Variable: MAC Human Readable Format",
+          "Variable: GPON S/N Human Readable Format"
+        ]
+      },
+      {
+        "id": "C",
+        "title": "ZONE C - Compliance / DoC / Artwork",
+        "instruction": "請將整張 Inner Box Label 完整放入 Camera 可見範圍；程式判定 COMTREND / Recycling / CE / WEEE 的形狀與相對位置。圖形尺寸大小目前不判定。",
+        "target_rect": [
+          0.05,
+          0.58,
+          0.96,
+          0.94
+        ],
+        "items": [
+          "Fixed: DoC Link",
+          "Variable: Made in Format",
+          "Artwork: COMTREND Logo",
+          "Artwork: Recycling Mark",
+          "Artwork: CE Mark",
+          "Artwork: WEEE Mark"
+        ]
+      }
+    ]
+  },
+  "vision": {
+    "label_long_short_ratio": 2.05,
+    "label_expand_margin": 1.02
+  }
+}

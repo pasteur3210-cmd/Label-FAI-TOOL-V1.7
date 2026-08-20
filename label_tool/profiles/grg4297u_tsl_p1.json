@@ -1,0 +1,432 @@
+{
+  "profile_name": "GRG-4297u-TSL-P1",
+  "profile_version": "1.7.2",
+  "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
+  "fixed_fields": {
+    "model": "GRG-4297u",
+    "ip": "192.168.1.1",
+    "username": "user"
+  },
+  "rules": {
+    "sn_regex": "\\d{2}[1-9A-C]4297UF-[A-Z0-9]{2}\\d{6}",
+    "sn_display": "YYM4297UF-FFXXXXXX (18 chars)",
+    "ssid_prefix": "Telekom Slovenije_",
+    "gpon_prefix": "434D5444",
+    "password_length": 8,
+    "wifi_key_length": 14,
+    "forbidden_overlap_min": 4,
+    "pn_regex": "738125-00\\d",
+    "pn_display": "738125-00X",
+    "mac_regex": "[0-9A-F]{12}",
+    "gpon_regex": "434D5444[0-9A-F]{8}",
+    "made_in_allowed": [
+      "China",
+      "Taiwan"
+    ]
+  },
+  "image_quality": {
+    "min_sharpness": 55,
+    "min_brightness": 45,
+    "max_brightness": 235,
+    "min_contrast": 22
+  },
+  "notes": [
+    "V1.0.2 inspection principle: fixed values are compared with the SPEC/Profile.",
+    "Variable fields are read from the actual label and validated by format and relationship rules.",
+    "S/N, MAC, GPON S/N and QR content are variable values; SPEC examples are not used as per-unit expected values.",
+    "P/N and Made in may additionally be compared with work-order input when provided.",
+    "Each checklist item must receive the same valid result twice before LOCK; stable wrong value requires three confirmations before CONFIRMED_FAIL.",
+    "HID scanner can lock deterministic barcode/QR items immediately via two internal confirmations.",
+    "V1.1.1 LOCK is a terminal state. Recognition cannot auto-unlock or overwrite a locked value.",
+    "Start/Stop Live Scan preserves locks. Only New Unit / Reset Locks or Manual Unlock can clear them.",
+    "Live recognition uses latest-frame-only strategy and skips already locked items.",
+    "Live mode uses selective ROI OCR/Barcode/QR instead of full-label OCR every cycle.",
+    "V1.2.0 implements actual Progressive Zone Scan: A -> B -> C1 -> C2 -> C3 -> D.",
+    "PASS 1/2 survives unreadable/blur frames; only another valid PASS value replaces the candidate, or candidate TTL expires.",
+    "Zone D is camera-free rule evaluation using locked values.",
+    "GUI guides the operator to the current camera target zone.",
+    "V1.3.0 Hybrid Architecture: machine-readable Barcode/QR uses a separate full-frame direct zxingcpp pipeline modeled after the proven FQC Tool.",
+    "Barcode/QR no longer depends on Label Detection, perspective correction, Zone ROI, preprocessing variants or OCR.",
+    "Guided Zones are now dedicated to printed-text OCR only.",
+    "Fast machine-readable pipeline and slow OCR pipeline run independently in parallel.",
+    "Camera default restored to the proven FQC 1280x720 setting for live speed/stability.",
+    "V1.4.0 Printed Text live pipeline no longer uses Label Detection, perspective correction, corrected-label ROI, or automatic Zone rotation.",
+    "Operator-visible yellow target box is exactly the image crop sent to RapidOCR.",
+    "Guided OCR advances only after the current printed item LOCKS, or by explicit operator Next/Previous.",
+    "S/N, MAC and GPON human-readable OCR use already LOCKED barcode values as ground truth.",
+    "WiFi Key and SSID use decoded WiFi QR / locked MAC as ground truth when available.",
+    "Fixed descriptive text uses tolerant OCV/fuzzy or structured-value matching rather than exact full OCR substring.",
+    "Fast full-frame Barcode/QR pipeline from V1.3.0 remains unchanged.",
+    "V1.4.1 changes only operator guidance / Direct Guided OCR target-window presentation.",
+    "OCR target windows are centered and sized by item type; single-line text uses a narrow horizontal window.",
+    "Added Live OCR Target Zoom showing the exact crop sent to OCR.",
+    "Added center crosshair and target state colors: red/searching, yellow/detected, green/locked.",
+    "FastMachineReader, zxingcpp full-frame Barcode/QR, parser, camera capture and Smart Lock modules are protected from modification in this release.",
+    "V1.4.2 GUI fix: complete 16:9 camera image must remain visible; no top-only crop.",
+    "OCR Target Zoom is compact and height-capped.",
+    "FastMachineReader, CameraManager, Parser and SmartLock are unchanged and protected by SHA-256 regression gate.",
+    "V1.5.0 isolates RapidOCR/ONNX Runtime in a restartable child process.",
+    "Live Guided OCR does not start until OCR runtime preflight completes successfully.",
+    "Each OCR call has START/END logs and a hard timeout; a hung OCR process is terminated and restarted.",
+    "FastMachineReader, CameraManager, Parser and SmartLock remain protected and unchanged.",
+    "GitHub build now executes OCR inference from the packaged Windows EXE before artifact upload.",
+    "V1.5.1 fixes Worker->Tk transport using an in-process thread-safe Queue.",
+    "OCR, machine reader and OCR preflight workers never call Tk.after() or update widgets directly.",
+    "Only Tk main thread drains WorkerResultBus and runs merge/SmartLock/UI updates.",
+    "Adds QUEUE_PUT/QUEUE_GET/RULE_EVAL/SMART_LOCK_RESULT end-to-end trace.",
+    "V1.5.2 eliminates remaining Tk/Tcl cross-thread reads by snapshotting expected values, known fields and target data in the Tk main thread.",
+    "Guided OCR worker receives only frame + plain Python snapshots and never calls self._expected() or Tk Variable.get().",
+    "V1.5.3 fixes confirmed root cause: app.py used re.sub() in _merge_guided_result without importing re, causing NameError after QUEUE_GET.",
+    "Main-thread merge exceptions are now written to debug.log, test.log and execution.log with full traceback.",
+    "DirectGuidedOCR no longer silently converts OCR backend exceptions into empty OCR text.",
+    "V1.6.0 Production Mode uses four multi-field OCR zones; one OCR inference evaluates multiple existing V1.5.3 field rules.",
+    "Manual Item Debug mode retains the V1.5.3 single-item workflow for engineering troubleshooting.",
+    "Completion automatically saves result.json and Label_Inspection_Report_<session>.xlsx.",
+    "FastMachineReader, SmartLock, CameraManager, Parser, OCR runtime, WorkerBus and DirectGuidedOCR remain protected.",
+    "V1.6.1 build-quality fix: GitHub static gate now targets Ruff F821 undefined names; four unused imports were removed without changing inspection logic.",
+    "V1.6.2 GUI fix: Zone guidance moved into the right result pane; Production mode hides OCR Target Zoom and uses compact zone status so the full Camera preview retains usable height.",
+    "V1.7.0 multi-label profile architecture: profile-driven custom OCR targets allow additional label types without rewriting the core scheduler."
+  ],
+  "model": "GRG-4297u",
+  "label_pn": "680010-378",
+  "spec_version": "V3.0",
+  "vision": {
+    "label_long_short_ratio": 1.55,
+    "label_expand_margin": 1.08,
+    "label_expand_x": 1.55,
+    "label_expand_y": 2.35
+  },
+  "rois": {
+    "fixed_text": [
+      0.08,
+      0.0,
+      0.63,
+      0.76
+    ],
+    "pn": [
+      0.08,
+      0.08,
+      0.62,
+      0.28
+    ],
+    "ssid_password_wifi": [
+      0.08,
+      0.3,
+      0.63,
+      0.67
+    ],
+    "wifi_qr": [
+      0.4,
+      0.28,
+      0.64,
+      0.57
+    ],
+    "sn_text": [
+      0.62,
+      0.05,
+      0.99,
+      0.27
+    ],
+    "sn_barcode": [
+      0.62,
+      0.02,
+      0.99,
+      0.29
+    ],
+    "mac_text": [
+      0.62,
+      0.2,
+      0.99,
+      0.43
+    ],
+    "mac_barcode": [
+      0.62,
+      0.17,
+      0.99,
+      0.45
+    ],
+    "gpon_text": [
+      0.59,
+      0.34,
+      0.99,
+      0.58
+    ],
+    "gpon_barcode": [
+      0.59,
+      0.31,
+      0.99,
+      0.61
+    ]
+  },
+  "live": {
+    "pass_confirmations": 2,
+    "fail_confirmations": 3,
+    "identity_switch_confirmations": 3,
+    "scan_interval_ms": 250,
+    "camera_width": 1280,
+    "camera_height": 720,
+    "required_items": [
+      "Fixed: model",
+      "Fixed: ip",
+      "Fixed: username",
+      "Fixed: GPON VoIP Gateway",
+      "Fixed: Input 12V 1.5A",
+      "Fixed: USB 2.0 5V 500mA",
+      "Fixed: Comtrend Central Europe address",
+      "Fixed: CLASS 1 LASER PRODUCT",
+      "Variable: P/N Format",
+      "Variable: Made in Format",
+      "Variable: S/N Human Readable Format",
+      "Variable: S/N Barcode Format",
+      "Consistency: S/N Text vs Barcode",
+      "Variable: MAC Human Readable Format",
+      "Variable: MAC Barcode Format",
+      "Consistency: MAC Text vs Barcode",
+      "Variable: GPON S/N Human Readable Format",
+      "Variable: GPON S/N Barcode Format",
+      "Consistency: GPON S/N Text vs Barcode",
+      "Variable: SSID Format",
+      "Rule: SSID = MAC Last 6",
+      "Rule: GPON S/N = Prefix + MAC Last 8",
+      "Variable: Password Format",
+      "Variable: WiFi Key Format",
+      "Variable: WiFi QR Format",
+      "Consistency: QR SSID vs Printed SSID",
+      "Consistency: QR Key vs Printed WiFi Key"
+    ],
+    "preview_interval_ms": 50,
+    "latest_frame_only": true,
+    "skip_locked_items": true,
+    "full_ocr_live": false,
+    "candidate_ttl_sec": 12,
+    "zones": [
+      {
+        "id": "A",
+        "title": "ZONE A - Basic / Fixed Information",
+        "instruction": "Keep the whole label visible. Make the LEFT-UPPER basic information area sharp: Model / P-N / IP / Username / Input / USB / Made in.",
+        "camera": true,
+        "max_cycles": 3,
+        "guide_rect": [
+          0.05,
+          0.05,
+          0.62,
+          0.52
+        ],
+        "items": [
+          "Fixed: model",
+          "Fixed: ip",
+          "Fixed: username",
+          "Fixed: GPON VoIP Gateway",
+          "Fixed: Input 12V 1.5A",
+          "Fixed: USB 2.0 5V 500mA",
+          "Variable: P/N Format",
+          "Variable: Made in Format"
+        ]
+      },
+      {
+        "id": "B",
+        "title": "ZONE B - WiFi / Password / QR",
+        "instruction": "Printed-text OCR only. Make Password / WiFi Key / SSID clear. WiFi QR is decoded independently by the Fast Machine Read pipeline.",
+        "camera": true,
+        "max_cycles": 3,
+        "guide_rect": [
+          0.05,
+          0.28,
+          0.64,
+          0.72
+        ],
+        "items": [
+          "Variable: Password Format",
+          "Variable: WiFi Key Format",
+          "Variable: SSID Format"
+        ]
+      },
+      {
+        "id": "C1",
+        "title": "ZONE C1 - S/N",
+        "instruction": "Printed-text OCR only. Focus the S/N human-readable text. The S/N Code128 barcode is decoded independently from the full camera frame.",
+        "camera": true,
+        "max_cycles": 4,
+        "guide_rect": [
+          0.58,
+          0.02,
+          0.99,
+          0.28
+        ],
+        "items": [
+          "Variable: S/N Human Readable Format"
+        ]
+      },
+      {
+        "id": "C2",
+        "title": "ZONE C2 - MAC",
+        "instruction": "Printed-text OCR only. Focus the MAC human-readable text. The MAC Code128 barcode is decoded independently from the full camera frame.",
+        "camera": true,
+        "max_cycles": 4,
+        "guide_rect": [
+          0.58,
+          0.18,
+          0.99,
+          0.46
+        ],
+        "items": [
+          "Variable: MAC Human Readable Format"
+        ]
+      },
+      {
+        "id": "C3",
+        "title": "ZONE C3 - GPON S/N",
+        "instruction": "Printed-text OCR only. Focus the GPON S/N human-readable text. The GPON Code128 barcode is decoded independently from the full camera frame.",
+        "camera": true,
+        "max_cycles": 4,
+        "guide_rect": [
+          0.56,
+          0.32,
+          0.99,
+          0.62
+        ],
+        "items": [
+          "Variable: GPON S/N Human Readable Format"
+        ]
+      },
+      {
+        "id": "D",
+        "title": "ZONE D - Automatic Cross Check",
+        "instruction": "No camera movement is required. The program cross-checks values already LOCKED from previous zones.",
+        "camera": false,
+        "max_cycles": 1,
+        "guide_rect": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "items": [
+          "Consistency: S/N Text vs Barcode",
+          "Consistency: MAC Text vs Barcode",
+          "Consistency: GPON S/N Text vs Barcode",
+          "Rule: SSID = MAC Last 6",
+          "Rule: GPON S/N = Prefix + MAC Last 8",
+          "Consistency: QR SSID vs Printed SSID",
+          "Consistency: QR Key vs Printed WiFi Key"
+        ]
+      }
+    ],
+    "machine_scan_interval_ms": 250,
+    "hybrid_pipeline": true,
+    "fast_machine_items": [
+      "Variable: S/N Barcode Format",
+      "Variable: MAC Barcode Format",
+      "Variable: GPON S/N Barcode Format",
+      "Variable: WiFi QR Format"
+    ],
+    "guided_scan_interval_ms": 350,
+    "guided_min_sharpness": 18,
+    "live_text_pipeline": "direct_guided_target",
+    "legacy_label_detection_live_enabled": false,
+    "auto_rotate_guided_items_on_failure": false,
+    "target_equals_actual_ocr_crop": true,
+    "zones_enabled_in_live": false,
+    "center_scan_window": true,
+    "target_zoom_enabled": true,
+    "crosshair_enabled": true,
+    "target_window_reference_resolution": [
+      1280,
+      720
+    ],
+    "barcode_pipeline_protected": true,
+    "preview_aspect_ratio": "16:9",
+    "preview_full_frame_required": true,
+    "camera_preview_max_screen_fraction": 0.43,
+    "ocr_zoom_max_screen_fraction": 0.12,
+    "ocr_runtime_process_isolation": true,
+    "ocr_init_timeout_sec": 12,
+    "ocr_timeout_sec": 6,
+    "ocr_preflight_required": true,
+    "ocr_auto_restart_on_timeout": true,
+    "exe_ocr_smoke_test_required": true,
+    "worker_result_transport": "thread_safe_queue",
+    "worker_poll_interval_ms": 30,
+    "tk_calls_allowed_from_worker": false,
+    "worker_snapshot_isolation": true,
+    "merge_hard_trace": true,
+    "merge_fatal_capture": true,
+    "ocr_backend_exception_passthrough": true,
+    "zone_scan_interval_ms": 500,
+    "production_zone_mode_default": true,
+    "production_zones": [
+      {
+        "id": "A",
+        "title": "ZONE A - Basic Information",
+        "instruction": "請將 Label 上方基本資訊完整放入黃色區域。一次辨識 GPON / Model / P/N / Input / USB / IP / Username。",
+        "target_rect": [
+          0.08,
+          0.18,
+          0.92,
+          0.8
+        ],
+        "items": [
+          "Fixed: GPON VoIP Gateway",
+          "Fixed: model",
+          "Variable: P/N Format",
+          "Fixed: Input 12V 1.5A",
+          "Fixed: USB 2.0 5V 500mA",
+          "Fixed: ip",
+          "Fixed: username"
+        ]
+      },
+      {
+        "id": "B",
+        "title": "ZONE B - Wi-Fi Information",
+        "instruction": "請將 Password / WiFi Key / SSID 區域完整放入黃色區域。WiFi QR 由 Full-frame Reader 獨立掃描。",
+        "target_rect": [
+          0.08,
+          0.24,
+          0.92,
+          0.76
+        ],
+        "items": [
+          "Variable: Password Format",
+          "Variable: WiFi Key Format",
+          "Variable: SSID Format"
+        ]
+      },
+      {
+        "id": "C",
+        "title": "ZONE C - Device Identity",
+        "instruction": "請將 S/N / MAC / GPON S/N 人眼文字區域完整放入黃色區域。Barcode 由 Full-frame Reader 獨立掃描。",
+        "target_rect": [
+          0.08,
+          0.18,
+          0.92,
+          0.82
+        ],
+        "items": [
+          "Variable: S/N Human Readable Format",
+          "Variable: MAC Human Readable Format",
+          "Variable: GPON S/N Human Readable Format"
+        ]
+      },
+      {
+        "id": "D",
+        "title": "ZONE D - Compliance / Bottom Label",
+        "instruction": "請將 Made in / Comtrend Central Europe 地址 / CLASS 1 LASER PRODUCT 區域完整放入黃色區域。",
+        "target_rect": [
+          0.06,
+          0.14,
+          0.94,
+          0.86
+        ],
+        "items": [
+          "Variable: Made in Format",
+          "Fixed: Comtrend Central Europe address",
+          "Fixed: CLASS 1 LASER PRODUCT"
+        ]
+      }
+    ],
+    "camera_preview_priority_layout": true,
+    "production_hide_ocr_zoom": true,
+    "production_compact_zone_status": true
+  },
+  "label_type": "Chassis Label"
+}

@@ -1,0 +1,1509 @@
+from __future__ import annotations
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import logging
+import threading
+import os
+import re
+import traceback
+import time
+from datetime import datetime
+
+import cv2
+from PIL import Image, ImageTk
+
+from . import __version__
+from .core.engine import InspectionEngine
+from .core.profile_manager import discover_profiles
+from .core.camera_manager import CameraManager
+from .core.live_engine import LiveFrameAnalyzer, LOCK_TO_FIELD
+from .core.smart_lock import SmartLockEngine, IdentityGuard
+from .core.live_session import LiveInspectionSession
+from .core.fast_machine_reader import FastMachineReader
+from .core.direct_guided_ocr import DirectGuidedOCR, GuidedItemScheduler, GuidedTarget, targets_from_profile
+from .core.production_zone_ocr import MultiFieldZoneOCR, ProductionZoneScheduler, ProductionZone
+from .core.ocr_runtime import OCRProcessService, OCRRuntimeError, OCRRuntimeTimeout, OCRRuntimeInitError
+from .core.worker_bus import WorkerResultBus, WorkerEvent
+from .logging_setup import setup_logging
+
+log = logging.getLogger(__name__)
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(f"Label Auto Inspection Tool V{__version__}")
+        self.minsize(1180,720)
+        try:
+            if os.name=='nt': self.state('zoomed')
+        except Exception:
+            pass
+        self.geometry("1660x930")
+        self.minsize(1300, 760)
+
+        self.execution_log, self.debug_log = setup_logging()
+        self.profiles = {}
+        self.engine = None
+        self.live_analyzer = None
+        self.camera = CameraManager()
+        self.locks = None
+        self.identity_guard = IdentityGuard(3)
+        self.live_session = None
+        self.last_frame = None
+        self.preview_job = None
+        self.live_job = None
+        self.live_active = False
+        self.live_busy = False
+        self.new_unit_prompted = False
+        self.auto_saved = False
+        self.live_cycle = 0
+        self.dropped_busy_cycles = 0
+        self.last_perf_log = 0.0
+        self.zone_scheduler = None  # legacy/offline only; live V1.4 uses GuidedItemScheduler
+        self.guided_ocr = None
+        self.guided_scheduler = GuidedItemScheduler()
+        self.zone_ocr = None
+        self.production_scheduler = ProductionZoneScheduler()
+        self.ocr_mode_var = tk.StringVar(value="Production 4-Zone")
+        self.zone_items_var = tk.StringVar(value="")
+        self.zone_stats = {}
+        self.report_expected = {}
+        self.guided_expected_var = tk.StringVar(value='Expected: --')
+        self.guided_ocr_var = tk.StringVar(value='OCR: --')
+        self.guided_quality_var = tk.StringVar(value='Target: --')
+        self.ocr_runtime_var = tk.StringVar(value='OCR Engine: NOT READY')
+        self.ocr_runtime_state = 'NOT_READY'
+        self.ocr_runtime_busy = False
+        self.ocr_service = OCRProcessService(init_timeout_sec=12.0, read_timeout_sec=6.0)
+        self.target_zoom_photo = None
+        self.target_border_state = 'IDLE'
+        self.preview_last_size=(0,0)
+        self.preview_min_width=560
+        self.preview_min_height=240
+        self.fast_reader = None
+        self.machine_job = None
+        self.machine_busy = False
+        self.machine_cycle = 0
+        self.machine_state_var = tk.StringVar(value='Fast Machine Read: STOPPED')
+        self.worker_bus = WorkerResultBus(maxsize=96)
+        self.worker_poll_job = None
+        self.worker_poll_interval_ms = 30
+        self.worker_event_count = 0
+        self.zone_title_var = tk.StringVar(value='Current Zone: --')
+        self.zone_instruction_var = tk.StringVar(value='')
+        self.zone_progress_var = tk.StringVar(value='Zone Progress: --')
+
+        self.profile_var = tk.StringVar()
+        self.profile_info_var = tk.StringVar()
+        self.image_path = tk.StringVar()
+        self.expected_pn = tk.StringVar()
+        self.expected_country = tk.StringVar()
+        self.status_var = tk.StringVar(value="Ready")
+        self.camera_var = tk.StringVar()
+        self.live_state_var = tk.StringVar(value="Live: STOPPED")
+        self.progress_var = tk.StringVar(value="0 / 0 LOCKED")
+        self.scanner_var = tk.StringVar()
+        self._preview_photo = None
+
+        self._load_profiles()
+        self._build_ui()
+        if self.profiles:
+            self.profile_var.set(next(iter(self.profiles)))
+            self._apply_profile()
+        self.worker_poll_job = self.after(self.worker_poll_interval_ms, self._poll_worker_results)
+
+    def _load_profiles(self):
+        self.profiles = {name:(path,data) for name,path,data in discover_profiles()}
+
+    def _build_ui(self):
+        prof = ttk.LabelFrame(self, text="Golden Profile", padding=8)
+        prof.pack(fill="x", padx=8, pady=(8,4))
+        ttk.Label(prof, text="Profile:").grid(row=0,column=0,sticky="w")
+        self.profile_combo = ttk.Combobox(prof, textvariable=self.profile_var, state="readonly", width=38, values=list(self.profiles.keys()))
+        self.profile_combo.grid(row=0,column=1,padx=5,sticky="w")
+        self.profile_combo.bind("<<ComboboxSelected>>", lambda e:self._apply_profile())
+        ttk.Button(prof,text="Reload Profiles",command=self._reload_profiles).grid(row=0,column=2,padx=5)
+        ttk.Label(prof,textvariable=self.profile_info_var).grid(row=1,column=0,columnspan=8,sticky="w",pady=(5,0))
+
+        wo = ttk.LabelFrame(self, text="Optional Work Order Data", padding=8)
+        wo.pack(fill="x", padx=8, pady=(0,4))
+        ttk.Label(wo,text="P/N").grid(row=0,column=0,sticky="w")
+        ttk.Entry(wo,textvariable=self.expected_pn,width=22).grid(row=0,column=1,padx=(5,20))
+        ttk.Label(wo,text="Made in").grid(row=0,column=2,sticky="w")
+        ttk.Combobox(wo,textvariable=self.expected_country,width=16,values=["","China","Taiwan"]).grid(row=0,column=3,padx=5)
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=8, pady=4)
+        self.live_tab = ttk.Frame(nb)
+        self.image_tab = ttk.Frame(nb)
+        nb.add(self.live_tab, text="Live Camera / Smart Lock")
+        nb.add(self.image_tab, text="Offline Image Debug")
+        self._build_live_tab()
+        self._build_image_tab()
+
+        bottom = ttk.Frame(self,padding=8); bottom.pack(fill="x")
+        ttk.Label(bottom,textvariable=self.status_var).pack(side="left")
+        ttk.Label(bottom,text=f"Execution Log: {self.execution_log}").pack(side="right")
+
+    def _build_live_tab(self):
+        ctl = ttk.Frame(self.live_tab,padding=8); ctl.pack(fill="x")
+        ttk.Label(ctl,text="Camera:").pack(side="left")
+        self.camera_combo = ttk.Combobox(ctl,textvariable=self.camera_var,state="readonly",width=18)
+        self.camera_combo.pack(side="left",padx=5)
+        ttk.Button(ctl,text="Scan Cameras",command=self.scan_cameras).pack(side="left",padx=3)
+        self.camera_btn = ttk.Button(ctl,text="Start Camera",command=self.toggle_camera); self.camera_btn.pack(side="left",padx=3)
+        ttk.Button(ctl,text="Auto Focus",command=self.autofocus).pack(side="left",padx=3)
+        self.live_btn = ttk.Button(ctl,text="Start Live Scan",command=self.toggle_live); self.live_btn.pack(side="left",padx=12)
+        ttk.Button(ctl,text="New Unit / Reset Locks",command=self.new_unit).pack(side="left",padx=3)
+        ttk.Button(ctl,text="Unlock Selected",command=self.unlock_selected).pack(side="left",padx=3)
+        ttk.Label(ctl,textvariable=self.live_state_var,font=("Segoe UI",10,"bold")).pack(side="right",padx=8)
+
+        scan = ttk.LabelFrame(self.live_tab,text="HID Barcode Scanner (scan then Enter)",padding=6)
+        scan.pack(fill="x",padx=8,pady=(0,4))
+        ent = ttk.Entry(scan,textvariable=self.scanner_var,width=90)
+        ent.pack(side="left",fill="x",expand=True)
+        ent.bind("<Return>",self.on_scanner_enter)
+        self.scanner_entry = ent
+        ttk.Label(scan,text="Priority: HID Scanner > Full-frame Barcode/QR > OCR").pack(side="right",padx=8)
+        ttk.Label(scan,textvariable=self.machine_state_var,font=("Segoe UI",10,"bold")).pack(side="right",padx=12)
+        ttk.Button(scan,text="Retry OCR Engine",command=self.retry_ocr_runtime).pack(side="right",padx=5)
+        ttk.Label(scan,textvariable=self.ocr_runtime_var,font=("Segoe UI",10,"bold")).pack(side="right",padx=8)
+        self.ocr_mode_combo=ttk.Combobox(scan,textvariable=self.ocr_mode_var,state="readonly",width=20,values=["Production 4-Zone","Manual Item Debug"])
+        self.ocr_mode_combo.pack(side="right",padx=8)
+        self.ocr_mode_combo.bind("<<ComboboxSelected>>",lambda e:self._on_ocr_mode_change())
+        ttk.Label(scan,text="OCR Mode:").pack(side="right")
+
+        # V1.6.2: Camera Preview Priority Layout.
+        # Keep the Camera pane in the expandable main area.  Zone guidance is
+        # placed in the RIGHT pane so it can never consume the Camera's height.
+        main = ttk.Panedwindow(self.live_tab,orient="horizontal")
+        main.pack(fill="both",expand=True,padx=8,pady=4)
+        left = ttk.Frame(main)
+        right = ttk.Frame(main)
+        main.add(left,weight=4)
+        main.add(right,weight=6)
+
+        zone = ttk.LabelFrame(right,text="Production Zone OCR / Manual Item Debug",padding=6)
+        zone.pack(fill="x",padx=2,pady=(2,4))
+        ttk.Label(zone,textvariable=self.zone_title_var,font=("Segoe UI",13,"bold")).grid(row=0,column=0,columnspan=4,sticky="w")
+        ttk.Label(zone,textvariable=self.zone_instruction_var,font=("Segoe UI",9),wraplength=880).grid(row=1,column=0,columnspan=4,sticky="w",pady=(2,3))
+        ttk.Label(zone,textvariable=self.zone_progress_var,font=("Segoe UI",10,"bold")).grid(row=2,column=0,sticky="w")
+        ttk.Label(zone,textvariable=self.zone_items_var,font=("Consolas",9,"bold"),wraplength=880).grid(row=3,column=0,columnspan=4,sticky="w",pady=(3,0))
+        self.guided_expected_label=ttk.Label(zone,textvariable=self.guided_expected_var,font=("Segoe UI",9,"bold"))
+        self.guided_expected_label.grid(row=4,column=0,columnspan=4,sticky="w",pady=(1,0))
+        self.guided_ocr_label=ttk.Label(zone,textvariable=self.guided_ocr_var,font=("Consolas",9),wraplength=880)
+        self.guided_ocr_label.grid(row=5,column=0,columnspan=4,sticky="w")
+        self.guided_quality_label=ttk.Label(zone,textvariable=self.guided_quality_var,font=("Segoe UI",9))
+        self.guided_quality_label.grid(row=6,column=0,columnspan=4,sticky="w")
+        ttk.Button(zone,text="Previous Zone",command=self.previous_guided_item).grid(row=2,column=1,padx=4)
+        ttk.Button(zone,text="Retry Zone",command=self.retry_guided_item).grid(row=2,column=2,padx=4)
+        ttk.Button(zone,text="Next Zone",command=self.next_guided_item).grid(row=2,column=3,padx=4)
+        zone.columnconfigure(0,weight=1)
+        self.camera_frame=ttk.LabelFrame(left,text="Live Camera - Full Frame 16:9",padding=4)
+        self.camera_frame.pack(fill="both",expand=True,padx=4,pady=(4,2))
+        self.live_preview=tk.Label(self.camera_frame,anchor="center",bg="black",fg="white",text="Camera stopped")
+        self.live_preview.pack(fill="both",expand=True)
+        self.ocr_zoom_frame=ttk.LabelFrame(left,text="OCR Target Zoom - Manual Item Debug only",padding=4)
+        self.ocr_zoom_label=tk.Label(self.ocr_zoom_frame,text="OCR target preview",bg="black",fg="white",height=4,anchor="center")
+        self.ocr_zoom_label.pack(fill="both",expand=True)
+        self.preview_geometry_var=tk.StringVar(value="Preview: waiting for camera")
+        self.preview_geometry_label=ttk.Label(left,textvariable=self.preview_geometry_var,font=("Segoe UI",9))
+        self.preview_geometry_label.pack(fill="x",padx=6,pady=(0,2))
+        self.progress_label=ttk.Label(left,textvariable=self.progress_var,font=("Segoe UI",13,"bold"))
+        self.progress_label.pack(fill="x",pady=(2,4))
+        self._sync_live_layout_for_mode()
+
+        cols=("item","value","rule","state","message")
+        self.live_tree=ttk.Treeview(right,columns=cols,show="headings",height=30)
+        widths={"item":320,"value":260,"rule":270,"state":130,"message":300}
+        for c in cols:
+            self.live_tree.heading(c,text=c.title()); self.live_tree.column(c,width=widths[c],anchor="w")
+        self.live_tree.pack(fill="both",expand=True)
+        for tag,color in [("LOCK","#e8f5e9"),("VERIFY","#e3f2fd"),("SCANNING","#fff8e1"),("CONFIRMED_FAIL","#ffebee"),("VERIFY_FAIL","#fff3e0")]:
+            self.live_tree.tag_configure(tag,background=color)
+
+    def _build_image_tab(self):
+        top=ttk.Frame(self.image_tab,padding=8); top.pack(fill="x")
+        ttk.Label(top,text="Image:").grid(row=0,column=0,sticky="w")
+        ttk.Entry(top,textvariable=self.image_path,width=90).grid(row=0,column=1,padx=5,sticky="ew")
+        ttk.Button(top,text="Select JPG/PNG",command=self.select_image).grid(row=0,column=2,padx=5)
+        ttk.Button(top,text="Start Inspection",command=self.inspect_image).grid(row=0,column=3,padx=5)
+        top.columnconfigure(1,weight=1)
+        main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
+        left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
+        self.image_preview=ttk.Label(left,anchor="center",relief="sunken"); self.image_preview.pack(fill="both",expand=True)
+        self.image_overall=tk.Label(right,text="--",font=("Segoe UI",26,"bold")); self.image_overall.pack(fill="x")
+        cols=("item","actual","expected","status","code","message")
+        self.image_tree=ttk.Treeview(right,columns=cols,show="headings",height=28)
+        widths={"item":280,"actual":230,"expected":260,"status":90,"code":110,"message":300}
+        for c in cols:
+            self.image_tree.heading(c,text=c.title()); self.image_tree.column(c,width=widths[c],anchor="w")
+        self.image_tree.pack(fill="both",expand=True)
+
+    def _reload_profiles(self):
+        cur=self.profile_var.get(); self._load_profiles(); self.profile_combo['values']=list(self.profiles.keys())
+        if cur in self.profiles:self.profile_var.set(cur)
+        elif self.profiles:self.profile_var.set(next(iter(self.profiles)))
+        self._apply_profile()
+
+    def _apply_profile(self):
+        name=self.profile_var.get()
+        if not name or name not in self.profiles:return
+        path,data=self.profiles[name]
+        self.engine=InspectionEngine(data)
+        self.live_analyzer=LiveFrameAnalyzer(data)
+        self.fast_reader=FastMachineReader(data)
+        self.guided_ocr=DirectGuidedOCR(data, ocr_backend=self.ocr_service)
+        self.zone_ocr=MultiFieldZoneOCR(data, ocr_backend=self.ocr_service)
+        self.production_scheduler=ProductionZoneScheduler.from_profile(data)
+        live_cfg=data.get('live',{})
+        required=list(live_cfg.get('required_items',[]))
+        self.locks=SmartLockEngine(required, int(live_cfg.get('pass_confirmations',2)), int(live_cfg.get('fail_confirmations',3)), float(live_cfg.get('candidate_ttl_sec',12)))
+        self.identity_guard=IdentityGuard(int(live_cfg.get('identity_switch_confirmations',3)))
+        self.zone_scheduler=None
+        self.guided_scheduler=GuidedItemScheduler(targets_from_profile(data))
+        self.zone_stats={}
+        self.report_expected={}
+        self.profile_info_var.set(
+            f"Model: {data.get('model','')} | Label Type: {data.get('label_type','Chassis Label')} | "
+            f"Label P/N: {data.get('label_pn','')} | Spec: {data.get('spec_version','')} | "
+            f"Profile Ver: {data.get('profile_version','')} | File: {path.name}"
+        )
+        self._reset_live_tree()
+        self._update_zone_ui()
+        log.info('PROFILE_LOADED name=%s file=%s',name,path)
+
+    def _build_worker_snapshot(self, target):
+        """MAIN THREAD ONLY: copy every worker input away from Tk/Tcl state."""
+        expected_snapshot = dict(self._expected())
+        known_snapshot = dict(self._locked_known_fields())
+        known_snapshot["_required_items"] = list(self.locks.required_items)
+        target_snapshot = {
+            "item": str(target.item),
+            "title": str(target.title),
+            "instruction": str(target.instruction),
+            "target_rect": tuple(float(v) for v in target.target_rect),
+            "mode": str(target.mode),
+            "expected": str(target.expected),
+            "threshold": float(target.threshold),
+        }
+        return expected_snapshot, known_snapshot, target_snapshot
+
+    def _expected(self):
+        d={}
+        if self.expected_pn.get().strip():d['pn']=self.expected_pn.get().strip()
+        if self.expected_country.get().strip():d['made_in']=self.expected_country.get().strip()
+        return d
+
+    def _effective_required_items(self):
+        items=list(self.engine.profile.get('live',{}).get('required_items',[]))
+        if self.expected_pn.get().strip(): items.append('Work Order: P/N')
+        if self.expected_country.get().strip(): items.append('Work Order: Made in')
+        return items
+
+    def _reset_live_tree(self):
+        if not hasattr(self,'live_tree') or self.locks is None:return
+        required=self._effective_required_items()
+        self.locks.reset(required)
+        self.identity_guard.reset()
+        if self.guided_scheduler: self.guided_scheduler.reset()
+        if self.production_scheduler: self.production_scheduler.reset()
+        self.zone_stats={}
+        self.report_expected={}
+        for x in self.live_tree.get_children():self.live_tree.delete(x)
+        for name in required:
+            self.live_tree.insert('', 'end', iid=name, values=(name,'','', 'SCANNING',''), tags=('SCANNING',))
+        self.progress_var.set(f"0 / {len(required)} LOCKED")
+        self.auto_saved=False; self.new_unit_prompted=False
+
+    def scan_cameras(self):
+        self.status_var.set('Scanning cameras...'); self.update_idletasks()
+        found=self.camera.scan(6)
+        values=[f"Camera {i}" for i in found]
+        self.camera_combo['values']=values
+        if values:self.camera_var.set(values[0])
+        self.status_var.set(f"Found {len(values)} camera(s)")
+
+    def toggle_camera(self):
+        if self.camera.cap is not None:
+            self.stop_live(); self.camera.close(); self.camera_btn.config(text='Start Camera'); self.live_preview.config(image='',text='Camera stopped'); return
+        if not self.camera_var.get():
+            self.scan_cameras()
+        if not self.camera_var.get():
+            messagebox.showwarning('Camera','No camera found'); return
+        idx=int(self.camera_var.get().split()[-1])
+        cfg=self.engine.profile.get('live',{})
+        if not self.camera.open(idx,int(cfg.get('camera_width',1920)),int(cfg.get('camera_height',1080))):
+            messagebox.showerror('Camera','Unable to open camera'); return
+        self.camera_btn.config(text='Stop Camera')
+        log.info('CAMERA_OPEN index=%s backend=%s',idx,self.camera.backend_name)
+        self._update_preview()
+
+
+    def _target_state(self):
+        if self.locks is None:
+            return "SEARCHING"
+        if self._production_mode():
+            zone=self._current_production_zone()
+            if zone is None:
+                return "LOCKED"
+            items=self.production_scheduler.effective_items(zone,self.locks)
+            if items and all(self.locks.is_locked(x) for x in items):
+                return "LOCKED"
+            if any(x in self.locks.fields and self.locks.fields[x].state=="VERIFY" for x in items):
+                return "DETECTED"
+            return "SEARCHING"
+        target=self._current_guided_target()
+        if target is None:return "LOCKED"
+        if target.item in self.locks.fields:
+            state=self.locks.fields[target.item].state
+            if state=="LOCK":return "LOCKED"
+            if state=="VERIFY":return "DETECTED"
+        return "SEARCHING"
+
+    def _draw_target_overlay(self, display):
+        rect,title=self._active_scan()
+        if rect is None or display is None:return display
+        h,w=display.shape[:2]; x1,y1,x2,y2=rect
+        p1=(int(x1*w),int(y1*h)); p2=(int(x2*w),int(y2*h))
+        state=self._target_state()
+        color=(0,0,255) if state=="SEARCHING" else ((0,220,255) if state=="DETECTED" else (0,200,0))
+        cv2.rectangle(display,p1,p2,color,4)
+        cx=(p1[0]+p2[0])//2; cy=(p1[1]+p2[1])//2
+        cv2.line(display,(cx-45,cy),(cx+45,cy),color,2); cv2.line(display,(cx,cy-28),(cx,cy+28),color,2)
+        cv2.rectangle(display,(10,10),(min(w-10,1210),82),(0,0,0),-1)
+        prefix="ZONE" if self._production_mode() else "OCR"
+        cv2.putText(display,f"{prefix}: {title} | Put target area inside box",(22,52),cv2.FONT_HERSHEY_SIMPLEX,0.78,color,2,cv2.LINE_AA)
+        return display
+
+    def _update_target_zoom(self, frame):
+        rect,_=self._active_scan()
+        if rect is None or frame is None or not hasattr(self,'ocr_zoom_label'):return
+        try:
+            from .core.direct_guided_ocr import crop_relative
+            roi=crop_relative(frame,rect)
+            if roi is None or roi.size==0:return
+            zoom=roi.copy(); h,w=zoom.shape[:2]; state=self._target_state()
+            color=(0,0,255) if state=="SEARCHING" else ((0,220,255) if state=="DETECTED" else (0,200,0))
+            cv2.line(zoom,(w//2-35,h//2),(w//2+35,h//2),color,1); cv2.line(zoom,(w//2,h//2-20),(w//2,h//2+20),color,1)
+            rgb=cv2.cvtColor(zoom,cv2.COLOR_BGR2RGB); img=Image.fromarray(rgb); zw,zh=self._zoom_box_size(); img.thumbnail((zw,zh))
+            photo=ImageTk.PhotoImage(img); self.ocr_zoom_label.config(image=photo,text=''); self.ocr_zoom_label.image=photo; self.target_zoom_photo=photo
+        except Exception as exc:
+            if self.live_session:self.live_session.debug.exception("TARGET_ZOOM_FAIL err=%s",exc)
+
+    @staticmethod
+    def _fit_16_9(container_w:int, container_h:int, min_w:int=320, min_h:int=180):
+        """Largest 16:9 rectangle that fits completely inside the container."""
+        w=max(int(container_w),min_w)
+        h=max(int(container_h),min_h)
+        ratio=16/9
+        if w/h > ratio:
+            oh=h
+            ow=int(round(h*ratio))
+        else:
+            ow=w
+            oh=int(round(w/ratio))
+        return max(min_w,ow), max(min_h,oh)
+
+    def _preview_box_size(self):
+        """Keep the COMPLETE camera frame visible, even on short displays."""
+        try:
+            self.update_idletasks()
+            cw=max(self.camera_frame.winfo_width()-12,self.preview_min_width)
+            screen_h=max(self.winfo_screenheight(),720)
+            # Reserve enough vertical space for top controls, guided OCR status,
+            # compact OCR zoom and Windows taskbar.
+            max_h=max(280,min(int(screen_h*0.43),500))
+            return self._fit_16_9(cw,max_h,self.preview_min_width,self.preview_min_height)
+        except Exception:
+            return 640,360
+
+    def _zoom_box_size(self):
+        try:
+            self.update_idletasks()
+            cw=max(self.ocr_zoom_frame.winfo_width()-12,420)
+            screen_h=max(self.winfo_screenheight(),720)
+            zh=max(95,min(int(screen_h*0.12),145))
+            return min(cw,720),zh
+        except Exception:
+            return 640,120
+
+    def _update_preview(self):
+        ok,frame=self.camera.read()
+        if ok:
+            self.last_frame=frame.copy()
+            display=frame.copy()
+            display=self._draw_target_overlay(display)
+            self._update_target_zoom(frame)
+
+            rgb=cv2.cvtColor(display,cv2.COLOR_BGR2RGB)
+            img=Image.fromarray(rgb)
+            pw,ph=self._preview_box_size()
+            img.thumbnail((pw,ph))
+            photo=ImageTk.PhotoImage(img)
+            self.live_preview.config(image=photo,text='')
+            self.live_preview.image=photo
+            self.preview_last_size=(img.width,img.height)
+            self.preview_geometry_var.set(f'Preview: {img.width}x{img.height} | aspect {img.width/img.height:.3f} | FULL FRAME VISIBLE')
+        if self.camera.cap is not None:
+            self.preview_job=self.after(50,self._update_preview)
+
+    def autofocus(self):
+        ok,val=self.camera.autofocus(True)
+        log.info('AUTOFOCUS set_ok=%s readback=%s',ok,val)
+        messagebox.showinfo('Auto Focus',f'Set={ok}\nReadback={val}')
+
+
+
+    def _production_mode(self):
+        return self.ocr_mode_var.get().startswith("Production")
+
+    def _sync_live_layout_for_mode(self):
+        """Protect Camera Preview height in Production mode.
+
+        Production 4-Zone:
+          - Camera is the primary left-pane content.
+          - OCR Target Zoom is hidden.
+          - Raw OCR/Expected diagnostic rows are hidden from the Zone panel.
+
+        Manual Item Debug:
+          - OCR Target Zoom and diagnostic rows are shown.
+        """
+        production=self._production_mode()
+        try:
+            if production:
+                self.ocr_zoom_frame.pack_forget()
+                self.guided_expected_label.grid_remove()
+                self.guided_ocr_label.grid_remove()
+            else:
+                self.ocr_zoom_frame.pack(fill="x",padx=4,pady=(2,2),before=self.preview_geometry_label)
+                self.guided_expected_label.grid()
+                self.guided_ocr_label.grid()
+        except Exception:
+            log.exception("LIVE_LAYOUT_SYNC_FAIL mode=%s",self.ocr_mode_var.get())
+
+    def _on_ocr_mode_change(self):
+        if self.live_active:
+            self.stop_live()
+        self.live_busy=False
+        self.guided_ocr_var.set("OCR: --")
+        self.guided_quality_var.set("Target: mode changed")
+        self._sync_live_layout_for_mode()
+        self._update_zone_ui()
+        log.info("OCR_MODE_CHANGED mode=%s",self.ocr_mode_var.get())
+
+    def _current_production_zone(self):
+        if not self.production_scheduler or self.locks is None:
+            return None
+        return self.production_scheduler.select_next_incomplete(self.locks)
+
+    def _active_scan(self):
+        if self._production_mode():
+            z=self._current_production_zone()
+            if z: return z.target_rect,z.title
+            return None,"COMPLETE"
+        t=self._current_guided_target()
+        if t: return t.target_rect,t.title
+        return None,"COMPLETE"
+
+    def _current_guided_target(self):
+        if not self.guided_scheduler:
+            return None
+        return self.guided_scheduler.select_next_incomplete(self.locks)
+
+    def _update_zone_ui(self):
+        if self.locks is None:return
+        if self._production_mode():
+            zone=self._current_production_zone()
+            if not zone:
+                self.zone_title_var.set("Current Scan Zone: COMPLETE")
+                self.zone_instruction_var.set("All production OCR zones are complete.")
+                self.zone_progress_var.set("Zone Progress: COMPLETE")
+                self.zone_items_var.set("✓ A  ✓ B  ✓ C  ✓ D")
+                self.guided_expected_var.set("Expected: --")
+                return
+            locked,total=self.production_scheduler.progress(zone,self.locks)
+            self.zone_title_var.set(f"Current Scan Zone: {zone.id} - {zone.title.replace('ZONE '+zone.id+' - ','')}")
+            self.zone_instruction_var.set(zone.instruction)
+            self.zone_progress_var.set(f"Zone Progress: {locked}/{total} LOCKED | Overall: {self.locks.locked_count()}/{len(self.locks.required_items)}")
+            parts=[]
+            for item in self.production_scheduler.effective_items(zone,self.locks):
+                st=self.locks.status_text(item) if item in self.locks.fields else "--"
+                icon="✓" if st=="LOCK" else ("●" if st.startswith("PASS") else "○")
+                short=item.replace("Fixed: ","").replace("Variable: ","").replace(" Format","")
+                parts.append(f"{icon} {short}: {st}")
+            self.zone_items_var.set("  |  ".join(parts))
+            self.guided_expected_var.set("Expected: each field uses the existing V1.5.3 rule / barcode ground truth")
+            return
+
+        target=self._current_guided_target()
+        if not target:
+            self.zone_title_var.set("Current OCR Item: COMPLETE"); self.zone_instruction_var.set("All printed-text OCR items are locked.")
+            self.zone_progress_var.set("Printed Text: COMPLETE"); self.zone_items_var.set(""); self.guided_expected_var.set("Expected: --"); return
+        guided_items=[t.item for t in self.guided_scheduler.targets if t.item in self.locks.fields]
+        locked=sum(1 for x in guided_items if self.locks.is_locked(x))
+        self.zone_title_var.set(f"Current OCR Item: {target.title}")
+        self.zone_instruction_var.set("Manual Item Debug：請將目前單一文字完整放入中央掃描框。 "+target.instruction)
+        self.zone_progress_var.set(f"Printed Text: {locked}/{len(guided_items)} LOCKED | Current: {self.locks.status_text(target.item)}")
+        self.zone_items_var.set(f"Debug Item: {target.item}")
+        known=self._locked_known_fields(); expected=target.expected
+        if target.mode=="sn_text":expected=known.get("sn_barcode","") or "Waiting for S/N barcode"
+        elif target.mode=="mac_text":expected=known.get("mac_barcode","") or "Waiting for MAC barcode"
+        elif target.mode=="gpon_text":expected=known.get("gpon_sn_barcode","") or "Waiting for GPON barcode"
+        elif target.mode=="wifi_key":expected=known.get("qr_wifi_key","") or "14 characters"
+        elif target.mode=="ssid":
+            expected=known.get("qr_ssid","")
+            if not expected and known.get("mac_barcode"):expected=self.engine.profile.get("rules",{}).get("ssid_prefix","Telekom Slovenije_")+known["mac_barcode"][-6:]
+            expected=expected or "Telekom Slovenije_XXXXXX"
+        elif target.mode=="pn":expected=self.expected_pn.get().strip() or self.engine.profile.get("rules",{}).get("pn_display","738125-00X")
+        elif target.mode=="made_in":expected=self.expected_country.get().strip() or "China / Taiwan"
+        self.guided_expected_var.set(f"Expected: {expected or '--'}")
+
+    def next_guided_item(self):
+        if self._production_mode():
+            z=self.production_scheduler.next(self.locks); self._update_zone_ui()
+            if self.live_session and z:self.live_session.execution.info("ZONE_MANUAL_NEXT zone=%s",z.id)
+        elif self.guided_scheduler:
+            t=self.guided_scheduler.next(self.locks); self._update_zone_ui()
+            if self.live_session and t:self.live_session.execution.info("GUIDED_MANUAL_NEXT item=%s",t.item)
+
+    def previous_guided_item(self):
+        if self._production_mode():
+            z=self.production_scheduler.previous(); self._update_zone_ui()
+            if self.live_session and z:self.live_session.execution.info("ZONE_MANUAL_PREVIOUS zone=%s",z.id)
+        elif self.guided_scheduler:
+            t=self.guided_scheduler.previous(); self._update_zone_ui()
+            if self.live_session and t:self.live_session.execution.info("GUIDED_MANUAL_PREVIOUS item=%s",t.item)
+
+    def retry_guided_item(self):
+        self.guided_ocr_var.set("OCR: --"); self.guided_quality_var.set("Target: retry requested")
+        if self._production_mode():
+            z=self.production_scheduler.retry(); self._update_zone_ui()
+            if self.live_session and z:self.live_session.execution.info("ZONE_MANUAL_RETRY zone=%s",z.id)
+        elif self.guided_scheduler:
+            t=self.guided_scheduler.retry(); self._update_zone_ui()
+            if self.live_session and t:self.live_session.execution.info("GUIDED_MANUAL_RETRY item=%s",t.item)
+
+    def toggle_live(self):
+        if self.live_active:self.stop_live(); return
+        if self.camera.cap is None:
+            messagebox.showwarning('Live Scan','Start camera first'); return
+        # V1.1.1: Start/Stop Live Scan must NOT clear LOCK states.
+        # Only New Unit / Reset Locks or explicit Unlock Selected may do so.
+        if self.locks is None:
+            self._reset_live_tree()
+        self.live_session=LiveInspectionSession('live_records',self.profile_var.get())
+        if self.last_frame is not None:self.live_session.save_image('first_frame.jpg',self.last_frame)
+        self.live_active=True; self.live_btn.config(text='Stop Live Scan'); self.live_state_var.set('Live: SCANNING')
+        current=(self._current_production_zone().id if self._production_mode() and self._current_production_zone() else (self._current_guided_target().item if self._current_guided_target() else '-'))
+        self.live_session.execution.info('LIVE_SCAN_START required=%d mode=%s current=%s',len(self.locks.required_items),self.ocr_mode_var.get(),current)
+        self._update_zone_ui()
+        self.machine_state_var.set('Fast Machine Read: RUNNING')
+        self._write_runtime_self_checks()
+        self._schedule_machine_read()
+        self._start_ocr_preflight_async()
+
+    def stop_live(self):
+        self.live_active=False; self.live_btn.config(text='Start Live Scan'); self.live_state_var.set('Live: STOPPED')
+        if self.live_job:
+            try:self.after_cancel(self.live_job)
+            except Exception:pass
+            self.live_job=None
+        if self.machine_job:
+            try:self.after_cancel(self.machine_job)
+            except Exception:pass
+            self.machine_job=None
+        self.machine_state_var.set('Fast Machine Read: STOPPED')
+        if self.live_session:self.live_session.execution.info('LIVE_SCAN_STOP')
+
+
+
+
+    def _queue_worker_event(self, event: WorkerEvent):
+        """Worker-thread safe. Never touches Tk widgets."""
+        ok=self.worker_bus.put(event)
+        session=self.live_session
+        if session:
+            try:
+                session.debug.info(
+                    "QUEUE_PUT kind=%s cycle=%s item=%s ok=%s qsize=%s dropped=%s",
+                    event.kind,event.cycle_id,event.item,ok,
+                    self.worker_bus.size(),self.worker_bus.dropped
+                )
+            except Exception:
+                pass
+        return ok
+
+    def _log_main_thread_exception(self, stage, event, exc):
+        tb = traceback.format_exc()
+        cycle = getattr(event, "cycle_id", 0) if event is not None else 0
+        item = getattr(event, "item", "") if event is not None else ""
+        kind = getattr(event, "kind", "") if event is not None else ""
+        msg = (
+            f"{stage} kind={kind} cycle={cycle} item={item} "
+            f"exc={type(exc).__name__}: {exc}"
+        )
+        log.exception(msg)
+        if self.live_session:
+            self.live_session.debug.error("%s\n%s", msg, tb)
+            self.live_session.test.error("%s", msg)
+            self.live_session.execution.error("%s", msg)
+        try:
+            self.guided_quality_var.set(
+                f"Target: MERGE ERROR | {type(exc).__name__}: {exc}"
+            )
+        except Exception:
+            pass
+
+    def _dispatch_worker_event(self, event):
+        """Tk MAIN THREAD ONLY. One event failure must never hide the root cause."""
+        if self.live_session:
+            self.live_session.debug.info(
+                "MERGE_DISPATCH_START kind=%s cycle=%s item=%s",
+                event.kind,event.cycle_id,event.item
+            )
+
+        if event.kind=="ocr_preflight_ok":
+            self._ocr_preflight_done(True,event.payload,None)
+
+        elif event.kind=="ocr_preflight_fail":
+            self._ocr_preflight_done(False,None,event.payload)
+
+        elif event.kind=="machine_result":
+            self.machine_busy=False
+            result,cycle_id=event.payload
+            self._merge_machine_result(result,cycle_id)
+
+        elif event.kind=="machine_error":
+            self.machine_busy=False
+            if self.live_session:
+                self.live_session.debug.error(
+                    "FAST_MACHINE_FAIL_MAIN cycle=%s err=%r",
+                    event.cycle_id,event.payload
+                )
+
+        elif event.kind=="zone_result":
+            self.live_busy=False
+            result,frame,cycle_id=event.payload
+            self._merge_zone_result(result,frame,cycle_id)
+
+        elif event.kind=="guided_result":
+            self.live_busy=False
+            if self.live_session:
+                self.live_session.debug.info(
+                    "MERGE_PAYLOAD_BEGIN cycle=%s item=%s payload_type=%s",
+                    event.cycle_id,event.item,type(event.payload).__name__
+                )
+            result,frame,cycle_id=event.payload
+            if self.live_session:
+                self.live_session.debug.info(
+                    "MERGE_PAYLOAD_OK cycle=%s item=%s result_type=%s",
+                    cycle_id,event.item,type(result).__name__
+                )
+            self._merge_guided_result(result,frame,cycle_id)
+
+        elif event.kind=="ocr_runtime_problem":
+            self.live_busy=False
+            self._handle_ocr_runtime_problem(
+                event.payload,event.cycle_id,event.item
+            )
+
+        elif event.kind=="guided_error":
+            self.live_busy=False
+            if self.live_session:
+                self.live_session.debug.error(
+                    "GUIDED_OCR_FAIL_MAIN cycle=%s item=%s err=%r",
+                    event.cycle_id,event.item,event.payload
+                )
+
+        else:
+            if self.live_session:
+                self.live_session.debug.warning(
+                    "QUEUE_UNKNOWN_EVENT kind=%s cycle=%s item=%s",
+                    event.kind,event.cycle_id,event.item
+                )
+
+        if self.live_session:
+            self.live_session.debug.info(
+                "MERGE_DISPATCH_END kind=%s cycle=%s item=%s",
+                event.kind,event.cycle_id,event.item
+            )
+
+    def _poll_worker_results(self):
+        """Tk MAIN THREAD ONLY: drain worker events and merge into GUI/state."""
+        try:
+            events=self.worker_bus.drain(limit=48)
+            for event in events:
+                self.worker_event_count += 1
+                if self.live_session:
+                    self.live_session.debug.info(
+                        "QUEUE_GET kind=%s cycle=%s item=%s age_ms=%.1f qsize=%s",
+                        event.kind,event.cycle_id,event.item,
+                        max(0.0,(time.time()-event.created_at)*1000.0),
+                        self.worker_bus.size()
+                    )
+                try:
+                    self._dispatch_worker_event(event)
+                except Exception as exc:
+                    self.live_busy=False
+                    self.machine_busy=False
+                    self._log_main_thread_exception(
+                        "MERGE_FATAL",event,exc
+                    )
+        except Exception as exc:
+            self._log_main_thread_exception(
+                "WORKER_RESULT_POLL_FATAL",None,exc
+            )
+        finally:
+            try:
+                if self.winfo_exists():
+                    self.worker_poll_job=self.after(
+                        self.worker_poll_interval_ms,
+                        self._poll_worker_results
+                    )
+            except Exception:
+                log.exception("WORKER_RESULT_POLL_RESCHEDULE_FAIL")
+
+
+    def _write_runtime_self_checks(self):
+        if not self.live_session:
+            return
+        try:
+            import zxingcpp
+            self.live_session.test.info("ZXING_RUNTIME_PASS module=%s", getattr(zxingcpp,'__name__','zxingcpp'))
+        except Exception as exc:
+            self.live_session.test.exception("ZXING_RUNTIME_FAIL err=%s", exc)
+        try:
+            probe=SmartLockEngine(['probe'],2,3,12)
+            probe.offer('probe','OK','PASS'); probe.offer('probe','OK','PASS')
+            ok=probe.is_locked('probe')
+            self.live_session.test.info("SMART_LOCK_RUNTIME_%s", 'PASS' if ok else 'FAIL')
+        except Exception as exc:
+            self.live_session.test.exception("SMART_LOCK_RUNTIME_FAIL err=%s", exc)
+        try:
+            stats=self.camera.stats()
+            self.live_session.test.info("CAMERA_RUNTIME_PASS backend=%s stats=%s", self.camera.backend_name, stats)
+        except Exception as exc:
+            self.live_session.test.exception("CAMERA_RUNTIME_FAIL err=%s", exc)
+
+    @staticmethod
+    def _ocr_smoke_image():
+        import numpy as np
+        img=np.full((180,1000,3),255,dtype=np.uint8)
+        cv2.putText(img,'GPON VoIP Gateway',(35,115),cv2.FONT_HERSHEY_SIMPLEX,2.0,(0,0,0),4,cv2.LINE_AA)
+        return img
+
+    def _start_ocr_preflight_async(self, force=False):
+        if self.ocr_runtime_busy:
+            return
+        if self.ocr_service.ready and not force:
+            self.ocr_runtime_state='READY'
+            self.ocr_runtime_var.set(f'OCR Engine: READY | PID {self.ocr_service.pid}')
+            if self.live_active and self.live_job is None:
+                self._schedule_live()
+            return
+        self.ocr_runtime_busy=True
+        self.ocr_runtime_state='INITIALIZING'
+        self.ocr_runtime_var.set('OCR Engine: INITIALIZING...')
+        self.guided_quality_var.set('Target: waiting for OCR runtime preflight')
+        if self.live_session:
+            self.live_session.test.info('OCR_RUNTIME_LOAD_START force=%s',force)
+            self.live_session.debug.info('OCR_RUNTIME_PREFLIGHT_START')
+        threading.Thread(target=self._ocr_preflight_worker,args=(force,),daemon=True,name='OCRPreflightWorker').start()
+
+    def _ocr_preflight_worker(self, force=False):
+        try:
+            if force:
+                self.ocr_service.stop()
+            img=self._ocr_smoke_image()
+            cfg=self.engine.profile.get('live',{}) if self.engine else {}
+            info=self.ocr_service.preflight(
+                img,
+                init_timeout_sec=float(cfg.get('ocr_init_timeout_sec',12)),
+                read_timeout_sec=float(cfg.get('ocr_timeout_sec',6)),
+            )
+            self._queue_worker_event(
+                WorkerEvent(kind="ocr_preflight_ok",payload=info,item="OCR_PREFLIGHT")
+            )
+        except Exception as exc:
+            self._queue_worker_event(
+                WorkerEvent(kind="ocr_preflight_fail",payload=exc,item="OCR_PREFLIGHT")
+            )
+
+    def _ocr_preflight_done(self, ok, info, exc):
+        self.ocr_runtime_busy=False
+        if ok:
+            self.ocr_runtime_state='READY'
+            self.ocr_runtime_var.set(
+                f"OCR Engine: READY | load {info.get('load_ms',0):.0f} ms | infer {info.get('inference_ms',0):.0f} ms"
+            )
+            self.guided_quality_var.set('Target: OCR runtime READY - align current text')
+            if self.live_session:
+                self.live_session.test.info(
+                    'OCR_RUNTIME_LOAD_PASS pid=%s load_ms=%.1f inference_ms=%.1f total_ms=%.1f lines=%s text=%r',
+                    info.get('pid'),info.get('load_ms',0),info.get('inference_ms',0),
+                    info.get('total_ms',0),info.get('line_count',0),info.get('text','')
+                )
+                self.live_session.debug.info('OCR_RUNTIME_PREFLIGHT_PASS info=%s',info)
+            if self.live_active and self.live_job is None:
+                self._schedule_live()
+        else:
+            self.ocr_runtime_state='FAIL'
+            self.ocr_runtime_var.set('OCR Engine: FAIL - press Retry OCR Engine')
+            self.guided_quality_var.set(f'Target: OCR ENGINE FAIL | {exc}')
+            if self.live_session:
+                self.live_session.test.exception('OCR_RUNTIME_LOAD_FAIL err=%r',exc)
+                self.live_session.debug.exception('OCR_RUNTIME_PREFLIGHT_FAIL err=%r',exc)
+
+    def retry_ocr_runtime(self):
+        if self.live_session:
+            self.live_session.execution.warning('OCR_RUNTIME_MANUAL_RETRY')
+        self._start_ocr_preflight_async(force=True)
+
+    def _handle_ocr_runtime_problem(self, exc, cycle_id, item):
+        recovered=bool(getattr(exc,'recovered',False) and self.ocr_service.ready)
+        self.ocr_runtime_state='READY' if recovered else 'FAIL'
+        if recovered:
+            self.ocr_runtime_var.set(f'OCR Engine: RECOVERED | restart #{self.ocr_service.restart_count}')
+            self.guided_quality_var.set('Target: OCR timeout recovered - scanning resumes')
+        else:
+            self.ocr_runtime_var.set('OCR Engine: FAIL - press Retry OCR Engine')
+            self.guided_quality_var.set(f'Target: OCR runtime error | {exc}')
+        if self.live_session:
+            self.live_session.test.error(
+                'OCR_RUNTIME_PROBLEM cycle=%s item=%s recovered=%s restart_count=%s err=%r',
+                cycle_id,item,recovered,self.ocr_service.restart_count,exc
+            )
+
+    def _locked_known_fields(self):
+        known = {}
+        if self.locks is None:
+            return known
+        for item_name, field_key in LOCK_TO_FIELD.items():
+            if self.locks.is_locked(item_name):
+                value = self.locks.locked_value(item_name)
+                if value:
+                    known[field_key] = value
+        # WiFi QR contains two additional values required by Zone D cross-check.
+        if known.get("wifi_qr"):
+            try:
+                from .core.parser import parse_decoded_fields
+                q = parse_decoded_fields([known["wifi_qr"]])
+                known.update({k:v for k,v in q.items() if v})
+            except Exception:
+                pass
+        return known
+
+
+    def _machine_items_remaining(self):
+        names = (
+            "Variable: S/N Barcode Format",
+            "Variable: MAC Barcode Format",
+            "Variable: GPON S/N Barcode Format",
+            "Variable: WiFi QR Format",
+        )
+        return [n for n in names if n in self.locks.fields and not self.locks.is_locked(n)]
+
+    def _schedule_machine_read(self):
+        if not self.live_active:
+            return
+
+        remaining = self._machine_items_remaining()
+        if not remaining:
+            self.machine_state_var.set("Fast Machine Read: ALL LOCKED")
+            return
+
+        if not self.machine_busy and self.last_frame is not None:
+            self.machine_busy = True
+            self.machine_cycle += 1
+            frame = self.last_frame.copy()
+            threading.Thread(
+                target=self._machine_worker,
+                args=(frame, self.machine_cycle),
+                daemon=True,
+                name="FastMachineReader",
+            ).start()
+
+        interval = int(self.engine.profile.get("live", {}).get("machine_scan_interval_ms", 250))
+        self.machine_job = self.after(interval, self._schedule_machine_read)
+
+    def _machine_worker(self, frame, cycle_id):
+        try:
+            result = self.fast_reader.read(frame)
+            self._queue_worker_event(
+                WorkerEvent(
+                    kind="machine_result",
+                    payload=(result,cycle_id),
+                    cycle_id=cycle_id,
+                    item="FAST_MACHINE",
+                )
+            )
+        except Exception as exc:
+            if self.live_session:
+                self.live_session.debug.exception(
+                    "FAST_MACHINE_FAIL cycle=%s err=%s", cycle_id, exc
+                )
+            self._queue_worker_event(
+                WorkerEvent(
+                    kind="machine_error",payload=exc,
+                    cycle_id=cycle_id,item="FAST_MACHINE"
+                )
+            )
+
+    def _merge_machine_result(self, result, cycle_id):
+        if not self.live_active:
+            return
+
+        if self.live_session:
+            self.live_session.debug.info(
+                "FAST_MACHINE cycle=%s elapsed_ms=%.1f decoded=%s values=%s",
+                cycle_id, result.elapsed_ms, len(result.decoded_texts), result.decoded_texts
+            )
+
+        locked_now = 0
+        for row in result.rows:
+            if self.live_session:
+                self.live_session.debug.info(
+                    'MERGE_ROW_BEGIN cycle=%s row_name=%s status=%s',
+                    cycle_id,getattr(row,'name',''),getattr(row,'status','')
+                )
+            name = row.name
+            if name not in self.locks.fields or self.locks.is_locked(name):
+                continue
+            self.__dict__.setdefault("report_expected",{})[name]=row.expected
+            state = self.locks.offer(
+                name, row.actual, "PASS", row.message, source="Full-frame zxingcpp"
+            )
+            if self.live_tree.exists(name):
+                self.live_tree.item(
+                    name,
+                    values=(name, row.actual, row.expected,
+                            self.locks.status_text(name), row.message),
+                    tags=(state,),
+                )
+            if self.live_session:
+                self.live_session.debug.info(
+                    "FAST_MACHINE_CANDIDATE item=%s state=%s value=%s",
+                    name, state, row.actual
+                )
+                if state == "LOCK":
+                    self.live_session.execution.info(
+                        "FAST_MACHINE_LOCKED item=%s value=%s elapsed_ms=%.1f",
+                        name, row.actual, result.elapsed_ms
+                    )
+                    self.live_session.lock_history.info(
+                        "LOCK source=FastMachine item=%s value=%s",name,row.actual
+                    )
+            if state == "LOCK":
+                locked_now += 1
+
+        left = len(self._machine_items_remaining())
+        self.machine_state_var.set(
+            f"Fast Machine Read: {4-left}/4 LOCKED | {result.elapsed_ms:.0f} ms"
+        )
+        self.progress_var.set(
+            f"{self.locks.locked_count()} / {len(self.locks.required_items)} LOCKED"
+        )
+
+        self._refresh_cross_checks()
+        self._update_zone_ui()
+        if self.last_frame is not None:
+            self._update_live_overall(self.last_frame)
+
+        # Identity can become known from the fast S/N barcode before OCR.
+        sn_item = "Variable: S/N Barcode Format"
+        if self.locks.is_locked(sn_item) and not self.identity_guard.current:
+            self.identity_guard.set_current(self.locks.locked_value(sn_item))
+
+
+    def _schedule_live(self):
+        if not self.live_active:return
+        if self.locks.all_locked():return
+        if self.ocr_runtime_state!='READY' or not self.ocr_service.ready:
+            self.live_job=None; return
+
+        if self._production_mode():
+            zone=self._current_production_zone()
+            if zone is None:
+                self._refresh_cross_checks(); interval=int(self.engine.profile.get('live',{}).get('zone_scan_interval_ms',500)); self.live_job=self.after(interval,self._schedule_live); return
+            if not self.live_busy and self.last_frame is not None:
+                self.live_busy=True; self.live_cycle+=1; frame=self.last_frame.copy()
+                expected_snapshot=dict(self._expected()); known_snapshot=dict(self._locked_known_fields()); known_snapshot['_required_items']=list(self.locks.required_items)
+                zone_snapshot=zone.snapshot()
+                requested=[]
+                for item in zone.items:
+                    base_incomplete=item in self.locks.fields and not self.locks.is_locked(item)
+                    dep_incomplete=(item=='Variable: P/N Format' and 'Work Order: P/N' in self.locks.fields and not self.locks.is_locked('Work Order: P/N')) or (item=='Variable: Made in Format' and 'Work Order: Made in' in self.locks.fields and not self.locks.is_locked('Work Order: Made in'))
+                    if base_incomplete or dep_incomplete:requested.append(item)
+                if self.live_session:self.live_session.debug.info('ZONE_WORKER_SNAPSHOT cycle=%s zone=%s requested=%s',self.live_cycle,zone.id,requested)
+                threading.Thread(target=self._zone_worker,args=(frame,zone_snapshot,known_snapshot,expected_snapshot,requested,self.live_cycle),daemon=True,name='MultiFieldZoneOCRWorker').start()
+            elif self.live_busy:self.dropped_busy_cycles+=1
+            interval=int(self.engine.profile.get('live',{}).get('zone_scan_interval_ms',500))
+            self.live_job=self.after(interval,self._schedule_live); return
+
+        target=self._current_guided_target()
+        if target is None:
+            self._refresh_cross_checks(); interval=int(self.engine.profile.get('live',{}).get('guided_scan_interval_ms',350)); self.live_job=self.after(interval,self._schedule_live); return
+        if not self.live_busy and self.last_frame is not None:
+            self.live_busy=True; self.live_cycle+=1; frame=self.last_frame.copy()
+            expected_snapshot,known_snapshot,target_snapshot=self._build_worker_snapshot(target)
+            if self.live_session:self.live_session.debug.info('WORKER_SNAPSHOT cycle=%s item=%s expected_keys=%s known_keys=%s',self.live_cycle,target_snapshot['item'],sorted(expected_snapshot.keys()),sorted(known_snapshot.keys()))
+            threading.Thread(target=self._guided_worker,args=(frame,target_snapshot,known_snapshot,expected_snapshot,self.live_cycle),daemon=True,name='DirectGuidedOCRWorker').start()
+        elif self.live_busy:self.dropped_busy_cycles+=1
+        interval=int(self.engine.profile.get('live',{}).get('guided_scan_interval_ms',350)); self.live_job=self.after(interval,self._schedule_live)
+
+    def _zone_worker(self, frame, zone_snapshot, known_fields, expected_snapshot, requested_items, cycle_id):
+        zone=ProductionZone.from_snapshot(zone_snapshot); started=time.perf_counter()
+        try:
+            if self.live_session:
+                self.live_session.debug.info('ZONE_WORKER_START cycle=%s zone=%s requested=%s runtime_pid=%s',cycle_id,zone.id,requested_items,self.ocr_service.pid)
+                self.live_session.test.info('ZONE_OCR_CALL_START cycle=%s zone=%s',cycle_id,zone.id)
+            min_sharp=float(self.engine.profile.get('live',{}).get('guided_min_sharpness',18))
+            result=self.zone_ocr.analyze(frame,zone,dict(known_fields),dict(expected_snapshot),min_sharpness=min_sharp,requested_items=requested_items)
+            if self.live_session:self.live_session.test.info('ZONE_OCR_CALL_END cycle=%s zone=%s wall_ms=%.1f raw_text=%r evaluated=%s pass_items=%s',cycle_id,zone.id,(time.perf_counter()-started)*1000.0,result.raw_text,result.evaluated_items,result.pass_items)
+            self._queue_worker_event(WorkerEvent(kind='zone_result',payload=(result,frame,cycle_id),cycle_id=cycle_id,item=f'ZONE {zone.id}'))
+        except OCRRuntimeTimeout as exc:
+            if self.live_session:self.live_session.debug.exception('ZONE_OCR_TIMEOUT cycle=%s zone=%s err=%s',cycle_id,zone.id,exc)
+            self._queue_worker_event(WorkerEvent(kind='ocr_runtime_problem',payload=exc,cycle_id=cycle_id,item=f'ZONE {zone.id}'))
+        except (OCRRuntimeError,OCRRuntimeInitError) as exc:
+            if self.live_session:self.live_session.debug.exception('ZONE_OCR_RUNTIME_FAIL cycle=%s zone=%s err=%s',cycle_id,zone.id,exc)
+            self._queue_worker_event(WorkerEvent(kind='ocr_runtime_problem',payload=exc,cycle_id=cycle_id,item=f'ZONE {zone.id}'))
+        except Exception as exc:
+            if self.live_session:self.live_session.debug.exception('ZONE_OCR_FAIL cycle=%s zone=%s err=%s',cycle_id,zone.id,exc)
+            self._queue_worker_event(WorkerEvent(kind='guided_error',payload=exc,cycle_id=cycle_id,item=f'ZONE {zone.id}'))
+
+    def _guided_worker(self, frame, target_snapshot, known_fields, expected_snapshot, cycle_id):
+        """BACKGROUND THREAD ONLY.
+
+        This method must not access Tk/Tcl state.  All Tk-derived values are
+        snapshotted on the main thread before this worker starts.
+        """
+        started=time.perf_counter()
+        item=str(target_snapshot["item"])
+
+        try:
+            target=GuidedTarget(
+                item=str(target_snapshot["item"]),
+                title=str(target_snapshot["title"]),
+                instruction=str(target_snapshot["instruction"]),
+                target_rect=list(target_snapshot["target_rect"]),
+                mode=str(target_snapshot["mode"]),
+                expected=str(target_snapshot["expected"]),
+                threshold=float(target_snapshot["threshold"]),
+            )
+
+            if self.live_session:
+                self.live_session.debug.info(
+                    "GUIDED_WORKER_START cycle=%s item=%s frame_shape=%s runtime_pid=%s snapshot=1",
+                    cycle_id,item,getattr(frame,"shape",None),self.ocr_service.pid
+                )
+                self.live_session.test.info(
+                    "OCR_CALL_START cycle=%s item=%s",cycle_id,item
+                )
+
+            min_sharp=float(
+                self.engine.profile.get("live",{}).get("guided_min_sharpness",18)
+            )
+            result=self.guided_ocr.analyze(
+                frame,
+                target,
+                dict(known_fields),
+                dict(expected_snapshot),
+                min_sharpness=min_sharp,
+            )
+
+            if self.live_session:
+                self.live_session.test.info(
+                    "OCR_CALL_END cycle=%s item=%s wall_ms=%.1f raw_text=%r",
+                    cycle_id,item,
+                    (time.perf_counter()-started)*1000.0,result.raw_text
+                )
+
+            self._queue_worker_event(
+                WorkerEvent(
+                    kind="guided_result",
+                    payload=(result,frame,cycle_id),
+                    cycle_id=cycle_id,
+                    item=item,
+                )
+            )
+
+        except OCRRuntimeTimeout as exc:
+            if self.live_session:
+                self.live_session.debug.exception(
+                    "OCR_TIMEOUT cycle=%s item=%s err=%s",cycle_id,item,exc
+                )
+            self._queue_worker_event(
+                WorkerEvent(
+                    kind="ocr_runtime_problem",
+                    payload=exc,
+                    cycle_id=cycle_id,
+                    item=item,
+                )
+            )
+        except (OCRRuntimeError, OCRRuntimeInitError) as exc:
+            if self.live_session:
+                self.live_session.debug.exception(
+                    "OCR_RUNTIME_FAIL cycle=%s item=%s err=%s",cycle_id,item,exc
+                )
+            self._queue_worker_event(
+                WorkerEvent(
+                    kind="ocr_runtime_problem",
+                    payload=exc,
+                    cycle_id=cycle_id,
+                    item=item,
+                )
+            )
+        except Exception as exc:
+            if self.live_session:
+                self.live_session.debug.exception(
+                    "GUIDED_OCR_FAIL cycle=%s item=%s err=%s",cycle_id,item,exc
+                )
+            self._queue_worker_event(
+                WorkerEvent(
+                    kind="guided_error",
+                    payload=exc,
+                    cycle_id=cycle_id,
+                    item=item,
+                )
+            )
+
+    def _merge_zone_result(self,result,frame,cycle_id):
+        if not self.live_active:return
+        zid=result.zone_id; safe=f"ZONE_{zid}"
+        st=self.zone_stats.setdefault(zid,{"title":result.zone_title,"attempts":0,"total_ocr_ms":0.0,"max_ocr_ms":0.0,"last_sharpness":0.0,"locked_items":0,"total_items":0,"completed":False})
+        st["attempts"]+=1; st["total_ocr_ms"]+=float(result.elapsed_ms); st["max_ocr_ms"]=max(st["max_ocr_ms"],float(result.elapsed_ms)); st["last_sharpness"]=float(result.sharpness)
+        if self.live_session:
+            self.live_session.debug.info('ZONE_MERGE_ENTER cycle=%s zone=%s rows=%s ready=%s sharp=%.1f elapsed_ms=%.1f',cycle_id,zid,len(result.rows),result.ready,result.sharpness,result.elapsed_ms)
+            self.live_session.performance.info('ZONE_PERF cycle=%s zone=%s elapsed_ms=%.1f sharp=%.1f evaluated=%s pass=%s',cycle_id,zid,result.elapsed_ms,result.sharpness,result.evaluated_items,result.pass_items)
+            self.live_session.save_target_image(f'{safe}_last.jpg',result.target_image)
+        shown=(result.raw_text or '').replace('\n',' | '); self.guided_ocr_var.set(f"OCR: {(shown[:240]+'...' if len(shown)>240 else shown) or '<empty>'}")
+        pass_count=sum(1 for r in result.rows if r.status=='PASS')
+        self.guided_quality_var.set(f"Target: {'READY / DETECTED' if pass_count else ('MOVE / FOCUS' if not result.ready else 'READING')} | Sharpness: {result.sharpness:.1f} | OCR time: {result.elapsed_ms:.0f} ms | PASS fields this cycle: {pass_count}")
+        for row in result.rows:
+            name=row.name
+            if name not in self.locks.fields or self.locks.is_locked(name):continue
+            value=self._candidate_value(row)
+            self.__dict__.setdefault("report_expected",{})[name]=row.expected
+            if self.live_session:
+                self.live_session.debug.info('ZONE_RULE_EVAL cycle=%s zone=%s item=%s status=%s actual=%s expected=%s message=%s',cycle_id,zid,name,row.status,value,row.expected,row.message)
+                if name.startswith('Artwork: '):
+                    self.live_session.test.info('ARTWORK_CHECK cycle=%s zone=%s item=%s status=%s actual=%s expected=%s message=%s',cycle_id,zid,name,row.status,value,row.expected,row.message)
+            state=self.locks.offer(name,value,row.status,row.message,source=f'Zone OCR {zid}')
+            if self.live_tree.exists(name):self.live_tree.item(name,values=(name,value,row.expected,self.locks.status_text(name),row.message),tags=(state,))
+            if self.live_session:
+                self.live_session.debug.info('ZONE_SMART_LOCK cycle=%s zone=%s item=%s state=%s value=%s',cycle_id,zid,name,state,value)
+                if state=='LOCK':
+                    self.live_session.execution.info('ZONE_ITEM_LOCKED zone=%s item=%s value=%s',zid,name,value)
+                    self.live_session.lock_history.info('LOCK source=ZoneOCR-%s item=%s value=%s',zid,name,value)
+        zone=next((z for z in self.production_scheduler.zones if z.id==zid),None)
+        if zone:
+            locked,total=self.production_scheduler.progress(zone,self.locks); st['locked_items']=locked; st['total_items']=total
+            completed=self.production_scheduler.is_complete(zone,self.locks); st['completed']=completed
+            if completed:
+                if self.live_session:
+                    self.live_session.execution.info('ZONE_COMPLETE zone=%s locked=%s total=%s',zid,locked,total)
+                    self.live_session.save_target_image(f'{safe}_LOCK.jpg',result.target_image)
+                if self.production_scheduler.current and self.production_scheduler.current.id==zid:
+                    self.production_scheduler.advance_if_complete(self.locks)
+                nxt=self.production_scheduler.select_next_incomplete(self.locks)
+                if self.live_session:self.live_session.execution.info('ZONE_AUTO_ADVANCE next=%s',nxt.id if nxt else 'COMPLETE')
+        self._refresh_cross_checks(); self._update_zone_ui(); self._update_live_overall(frame)
+        if self.live_session:self.live_session.debug.info('ZONE_MERGE_END cycle=%s zone=%s',cycle_id,zid)
+
+    def _merge_guided_result(self,result,frame,cycle_id):
+        if self.live_session:
+            self.live_session.debug.info(
+                "MERGE_ENTER cycle=%s result_type=%s live_active=%s",
+                cycle_id,type(result).__name__,self.live_active
+            )
+
+        if not self.live_active:
+            if self.live_session:
+                self.live_session.debug.warning(
+                    "MERGE_SKIPPED cycle=%s reason=live_active_false",
+                    cycle_id
+                )
+            return
+
+        if result is None:
+            raise ValueError("guided result is None")
+        if not hasattr(result,"item"):
+            raise TypeError(
+                f"guided result missing item attribute: {type(result).__name__}"
+            )
+        if not hasattr(result,"rows"):
+            raise TypeError(
+                f"guided result missing rows attribute: {type(result).__name__}"
+            )
+
+        if self.live_session:
+            self.live_session.debug.info(
+                "MERGE_RESULT_VALID cycle=%s item=%s rows=%s ready=%s raw_len=%s",
+                cycle_id,result.item,len(result.rows),getattr(result,"ready",None),
+                len(getattr(result,"raw_text","") or "")
+            )
+
+        safe_name=re.sub(r"[^A-Za-z0-9_.-]+","_",str(result.item))[:80]
+        if self.live_session:
+            self.live_session.debug.info(
+                "GUIDED_OCR cycle=%s item=%s ready=%s sharp=%.1f elapsed_ms=%.1f "
+                "score=%.3f expected=%s raw_text=%r",
+                cycle_id,result.item,result.ready,result.sharpness,result.elapsed_ms,
+                result.match_score,result.expected_display,result.raw_text
+            )
+            self.live_session.test.info(
+                "GUIDED_PERF cycle=%s item=%s elapsed_ms=%.1f sharp=%.1f score=%.3f",
+                cycle_id,result.item,result.elapsed_ms,result.sharpness,result.match_score
+            )
+            self.live_session.performance.info(
+                "GUIDED_PERF cycle=%s item=%s elapsed_ms=%.1f sharp=%.1f score=%.3f",
+                cycle_id,result.item,result.elapsed_ms,result.sharpness,result.match_score
+            )
+            self.live_session.save_target_image(f"{safe_name}_last.jpg",result.target_image)
+
+        shown=(result.raw_text or "").replace("\n"," | ")
+        if len(shown)>180:
+            shown=shown[:177]+"..."
+        self.guided_ocr_var.set(f"OCR: {shown or '<empty>'}")
+        state_text="READY / DETECTED" if any(r.status=="PASS" for r in result.rows) else (
+            "MOVE / FOCUS" if not result.ready or not result.raw_text else "READING"
+        )
+        self.guided_quality_var.set(
+            f"Target: {state_text} | Sharpness: {result.sharpness:.1f} | "
+            f"OCR time: {result.elapsed_ms:.0f} ms | Match: {result.match_score:.3f}"
+        )
+        if result.expected_display:
+            self.guided_expected_var.set(f"Expected: {result.expected_display}")
+
+        for row in result.rows:
+            name=row.name
+            if name not in self.locks.fields or self.locks.is_locked(name):
+                continue
+            value=self._candidate_value(row)
+            self.__dict__.setdefault("report_expected",{})[name]=row.expected
+            if self.live_session:
+                self.live_session.debug.info(
+                    "RULE_EVAL cycle=%s item=%s status=%s actual=%s expected=%s message=%s",
+                    cycle_id,name,row.status,value,row.expected,row.message
+                )
+            state=self.locks.offer(name,value,row.status,row.message,source="Direct Guided OCR")
+            if self.live_session:
+                self.live_session.debug.info(
+                    "SMART_LOCK_RESULT cycle=%s item=%s state=%s value=%s",
+                    cycle_id,name,state,value
+                )
+            if self.live_tree.exists(name):
+                self.live_tree.item(
+                    name,
+                    values=(name,value,row.expected,self.locks.status_text(name),row.message),
+                    tags=(state,)
+                )
+            if self.live_session:
+                self.live_session.debug.info(
+                    "GUIDED_CANDIDATE item=%s status=%s lock_state=%s actual=%s",
+                    name,row.status,state,value
+                )
+                if state=="LOCK":
+                    self.live_session.execution.info(
+                        "GUIDED_ITEM_LOCKED item=%s value=%s",name,value
+                    )
+                    self.live_session.lock_history.info(
+                        "LOCK source=DirectGuidedOCR item=%s value=%s",name,value
+                    )
+                    self.live_session.save_target_image(f"{safe_name}_LOCK.jpg",result.target_image)
+
+        changed=self.guided_scheduler.advance_if_locked(self.locks)
+        if changed and self.live_session:
+            nxt=self._current_guided_target()
+            self.live_session.execution.info(
+                "GUIDED_AUTO_ADVANCE next=%s", nxt.item if nxt else "COMPLETE"
+            )
+
+        self._refresh_cross_checks()
+        self._update_zone_ui()
+        self._update_live_overall(frame)
+        if self.live_session:
+            self.live_session.debug.info(
+                'MERGE_END cycle=%s item=%s',cycle_id,result.item
+            )
+
+    def _refresh_cross_checks(self):
+        """Derived rules use only LOCKED source values.
+
+        Since the inputs are already terminal/verified, PASS derived rules can
+        lock deterministically without a second camera observation.
+        """
+        known=self._locked_known_fields()
+        candidates=[
+            "Consistency: S/N Text vs Barcode",
+            "Consistency: MAC Text vs Barcode",
+            "Consistency: GPON S/N Text vs Barcode",
+            "Rule: SSID = MAC Last 6",
+            "Rule: GPON S/N = Prefix + MAC Last 8",
+            "Consistency: QR SSID vs Printed SSID",
+            "Consistency: QR Key vs Printed WiFi Key",
+        ]
+        required=set(self.locks.required_items if self.locks else [])
+        active=[name for name in candidates if name in required]
+        if not active:
+            return
+        rows=self.live_analyzer.evaluate_known_fields(
+            known,self._expected(),active
+        )
+        for row in rows:
+            if row.name not in self.locks.fields or self.locks.is_locked(row.name):
+                continue
+            if row.status=="PASS" and row.actual:
+                self.__dict__.setdefault("report_expected",{})[row.name]=row.expected
+                state=self.locks.force_lock(row.name,row.actual,source="Derived Rule Engine")
+                if self.live_tree.exists(row.name):
+                    self.live_tree.item(
+                        row.name,
+                        values=(row.name,row.actual,row.expected,self.locks.status_text(row.name),row.message),
+                        tags=(state,)
+                    )
+                if self.live_session:
+                    self.live_session.execution.info(
+                        "DERIVED_RULE_LOCKED item=%s actual=%s expected=%s",
+                        row.name,row.actual,row.expected
+                    )
+
+    def _update_live_overall(self,frame):
+        locked=self.locks.locked_count()
+        total=len(self.locks.required_items)
+        fails=self.locks.confirmed_fail_items()
+        self.progress_var.set(f"{locked} / {total} LOCKED")
+        if fails:
+            self.live_state_var.set("Live: CONFIRMED FAIL")
+        else:
+            if self._production_mode():
+                z=self._current_production_zone(); name=z.title if z else "Cross-check"
+            else:
+                t=self._current_guided_target(); name=t.title if t else "Cross-check"
+            self.live_state_var.set(f"Live: SCANNING | {name} | {locked}/{total}")
+
+        if self.locks.all_locked():
+            self.live_state_var.set("Live: PASS - ALL REQUIRED LOCKED")
+            if self.live_session and not self.auto_saved:
+                self.auto_saved=True
+                self.live_session.save_image("final_pass.jpg",frame)
+                completed=datetime.now()
+                elapsed=(completed-self.live_session.started_at).total_seconds()
+                payload={
+                    "overall":"PASS",
+                    "software_version":__version__,
+                    "profile":self.profile_var.get(),
+                    "model":self.engine.profile.get("model",""),
+                    "label_type":self.engine.profile.get("label_type",""),
+                    "label_pn":self.engine.profile.get("label_pn",""),
+                    "spec_version":self.engine.profile.get("spec_version",""),
+                    "source_spec":self.engine.profile.get("source_spec",""),
+                    "artwork_verification_status":self.engine.profile.get("artwork_verification",{}).get("status","NOT_CONFIGURED"),
+                    "session_id":self.live_session.session_id,
+                    "started_at":self.live_session.started_at.isoformat(timespec="seconds"),
+                    "work_order":self._expected(),
+                    "locks":self.locks.snapshot(),
+                    "locked_count":locked,
+                    "required_count":total,
+                    "zone_stats":self.zone_stats,
+                    "expected_map":self.report_expected,
+                    "ocr_mode":self.ocr_mode_var.get(),
+                    "elapsed_sec":round(elapsed,1),
+                    "completed_at":completed.isoformat(timespec="seconds")
+                }
+                self.live_session.save_result(payload)
+                report=self.live_session.save_excel_report(payload)
+                if report:self.status_var.set(f"PASS | Excel Report: {report}")
+            self.stop_live()
+
+    @staticmethod
+    def _candidate_value(row):
+            # For presence checks actual="Present"; for consistency rows actual is the source value.
+            return (row.actual or '').strip()
+
+    def _merge_live_result(self,result,frame,cycle_id=0):
+        """Legacy V1.3 ROI pipeline intentionally disabled for live V1.4."""
+        if self.live_session:
+            self.live_session.debug.warning(
+                "LEGACY_LIVE_RESULT_IGNORED cycle=%s",cycle_id
+            )
+
+    def on_scanner_enter(self,event=None):
+        raw=self.scanner_var.get().strip(); self.scanner_var.set('')
+        if not raw:return 'break'
+        if self.locks is None:self._reset_live_tree()
+        results=self.live_analyzer.scanner_results(raw,self._expected())
+        if self.live_session:self.live_session.execution.info('HID_SCAN received category_count=%d',len(results))
+        for row in results:
+            if row.name not in self.locks.fields:continue
+            # Deterministic HID data can be locked directly after validation.
+            self.__dict__.setdefault('report_expected',{})[row.name]=row.expected
+            state=self.locks.force_lock(row.name,row.actual,source='HID Scanner')
+            if self.live_tree.exists(row.name):
+                self.live_tree.item(row.name,values=(row.name,row.actual,row.expected,self.locks.status_text(row.name),'HID Scanner'),tags=(state,))
+            if self.live_session:self.live_session.execution.info('HID_ITEM item=%s state=%s value=%s',row.name,state,row.actual)
+        self.progress_var.set(f"{self.locks.locked_count()} / {len(self.locks.required_items)} LOCKED")
+        self.scanner_entry.focus_force(); return 'break'
+
+    def unlock_selected(self):
+        if self.locks is None:
+            return
+        selected=self.live_tree.selection()
+        if not selected:
+            messagebox.showinfo('Unlock Selected','Select one checklist row first.')
+            return
+        name=selected[0]
+        if not messagebox.askyesno('Unlock Selected',f'Unlock this item?\n\n{name}'):
+            return
+        if self.locks.manual_unlock(name):
+            self.live_tree.item(name,values=(name,'','',self.locks.status_text(name),'Manual engineering unlock'),tags=('SCANNING',))
+            if self.live_session:
+                self.live_session.execution.warning('MANUAL_UNLOCK item=%s',name)
+            self.progress_var.set(f"{self.locks.locked_count()} / {len(self.locks.required_items)} LOCKED")
+
+    def new_unit(self):
+        self.stop_live(); self._reset_live_tree(); self.live_session=None
+        self.live_state_var.set('Live: READY - NEW UNIT'); self.guided_ocr_var.set('OCR: --'); self.guided_quality_var.set('Target: --'); self._update_zone_ui()
+        log.info('NEW_UNIT_RESET explicit=True')
+
+    def select_image(self):
+        p=filedialog.askopenfilename(title='Select Label Photo',filetypes=[('Image','*.jpg *.jpeg *.png *.bmp'),('All Files','*.*')])
+        if p:self.image_path.set(p); self._show_image(p,self.image_preview)
+
+    def _show_image(self,path,label):
+        try:
+            img=Image.open(path); img.thumbnail((700,650)); photo=ImageTk.PhotoImage(img); label.config(image=photo); label.image=photo
+        except Exception as e:messagebox.showerror('Image Error',str(e))
+
+    def inspect_image(self):
+        p=self.image_path.get().strip()
+        if not p:messagebox.showwarning('No Image','Select image first'); return
+        try:
+            result=self.engine.inspect(p,'inspection_results',self._expected())
+            self.image_overall.config(text=result.overall,fg=('green' if result.overall=='PASS' else 'red'))
+            for x in self.image_tree.get_children():self.image_tree.delete(x)
+            if result.quality:
+                q=result.quality
+                for vals in [('Image Sharpness',f'{q.sharpness:.1f}','profile threshold','PASS' if q.sharpness_pass else 'FAIL','IMG-SHARP',''),('Image Brightness',f'{q.brightness:.1f}','profile range','PASS' if q.brightness_pass else 'FAIL','IMG-BRIGHT',''),('Image Contrast',f'{q.contrast:.1f}','profile threshold','PASS' if q.contrast_pass else 'FAIL','IMG-CONTRAST','')]:self.image_tree.insert('', 'end',values=vals)
+            for r in result.fields:self.image_tree.insert('', 'end',values=(r.name,r.actual,r.expected,r.status,r.error_code,r.message))
+            if result.marked_image_path:self._show_image(result.marked_image_path,self.image_preview)
+            self.status_var.set(f"Offline done | {result.overall} | {result.debug_dir}")
+        except Exception as e:
+            log.exception('OFFLINE_INSPECTION_FAIL'); messagebox.showerror('Inspection Error',str(e))
+
+    def destroy(self):
+        try:self.stop_live()
+        except Exception:pass
+        try:
+            if self.worker_poll_job:
+                self.after_cancel(self.worker_poll_job)
+                self.worker_poll_job=None
+        except Exception:pass
+        try:self.camera.close()
+        except Exception:pass
+        try:self.ocr_service.stop()
+        except Exception:pass
+        super().destroy()
+
+def main():
+    App().mainloop()
