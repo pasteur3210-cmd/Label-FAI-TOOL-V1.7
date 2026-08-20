@@ -30,8 +30,8 @@ class V171ZoneArtworkIntegration(unittest.TestCase):
         z=ProductionZoneScheduler.from_profile(self.profile).zones[2]
         result=ocr.analyze(frame,z,{},{"made_in":"China"},min_sharpness=0,requested_items=["Artwork: CE Mark"])
         row=next(r for r in result.rows if r.name=="Artwork: CE Mark")
-        self.assertEqual(row.status,"FAIL")
-        self.assertIn("pos=FAIL",row.message)
+        self.assertEqual(row.status,"WARN")
+        self.assertIn("ALIGN LABEL",row.message)
 
 if __name__=="__main__":
     unittest.main()

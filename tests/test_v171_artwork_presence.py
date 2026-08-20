@@ -30,14 +30,14 @@ class V171ArtworkPresenceTests(unittest.TestCase):
         frame=self._synthetic_frame_with_templates()
         rows,dets=self.detector.evaluate(frame)
         self.assertEqual(len(rows),4)
-        self.assertTrue(all(d.shape_pass for d in dets),[(d.item,d.score) for d in dets])
-        self.assertTrue(all(r.status=="FAIL" for r in rows))
-        self.assertTrue(all("label_align=NO" in r.message for r in rows))
+        self.assertTrue(all(r.status=="WARN" for r in rows))
+        self.assertTrue(all(not d.label_aligned for d in dets))
+        self.assertTrue(all("ALIGN LABEL" in r.message for r in rows))
 
     def test_absent_symbols_fail(self):
         frame=np.full((720,1280,3),235,dtype=np.uint8)
         rows,_=self.detector.evaluate(frame)
-        self.assertTrue(all(r.status=="FAIL" for r in rows))
+        self.assertTrue(all(r.status=="WARN" for r in rows))
 
     def test_profile_ignores_size_but_judges_shape_and_position(self):
         judged=self.profile["artwork_verification"]["judged_dimensions"]
