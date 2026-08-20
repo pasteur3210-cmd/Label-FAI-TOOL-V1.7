@@ -80,6 +80,7 @@ class ProductionZoneScheduler:
     def __init__(self, zones=None):
         self.zones=list(zones or DEFAULT_PRODUCTION_ZONES)
         self.index=0
+        self.manual_hold=False
 
     @classmethod
     def from_profile(cls, profile: dict):
@@ -97,7 +98,19 @@ class ProductionZoneScheduler:
     def current(self):
         return self.zones[self.index] if self.zones else None
 
-    def reset(self): self.index=0
+    def reset(self):
+        self.index=0
+        self.manual_hold=False
+
+    def resume_auto(self):
+        self.manual_hold=False
+
+    def current_for_display(self, locks):
+        if not self.zones:
+            return None
+        if self.manual_hold:
+            return self.current
+        return self.select_next_incomplete(locks)
 
     @staticmethod
     def effective_items(zone: ProductionZone, locks) -> list[str]:
@@ -114,6 +127,8 @@ class ProductionZoneScheduler:
 
     def select_next_incomplete(self, locks):
         if not self.zones: return None
+        if self.manual_hold:
+            return self.current
         for _ in range(len(self.zones)):
             z=self.current
             if not self.is_complete(z,locks): return z
@@ -121,6 +136,8 @@ class ProductionZoneScheduler:
         return None
 
     def advance_if_complete(self, locks) -> bool:
+        if self.manual_hold:
+            return False
         z=self.current
         if z and self.is_complete(z,locks):
             self.index=(self.index+1)%len(self.zones)
@@ -131,15 +148,18 @@ class ProductionZoneScheduler:
     def next(self, locks):
         if not self.zones:return None
         self.index=(self.index+1)%len(self.zones)
-        self.select_next_incomplete(locks)
+        self.manual_hold=True
         return self.current
 
     def previous(self):
         if not self.zones:return None
         self.index=(self.index-1)%len(self.zones)
+        self.manual_hold=True
         return self.current
 
-    def retry(self): return self.current
+    def retry(self):
+        self.manual_hold=True
+        return self.current
 
     def progress(self, zone: ProductionZone, locks):
         items=self.effective_items(zone,locks)
@@ -180,7 +200,7 @@ class MultiFieldZoneOCR:
     def analyze(self, frame, zone: ProductionZone, known: dict, expected_wo: dict,
                 min_sharpness: float=18.0, requested_items=None):
         started=time.perf_counter()
-        requested=set(requested_items or zone.items)
+        requested=set(zone.items if requested_items is None else requested_items)
         eval_items=[x for x in zone.items if x in requested]
 
         # V1.7.2 artwork detector receives the FULL frame, internally normalizes the label,

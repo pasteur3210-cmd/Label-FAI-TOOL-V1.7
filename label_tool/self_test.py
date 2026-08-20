@@ -62,15 +62,44 @@ def run_artwork_self_test(output_path='artwork_self_test.json'):
             required = [x['item'] for x in det.symbols]
             loaded = sorted(det.templates.keys())
             missing = [x for x in required if x not in det.templates]
+            status = det.resource_status()
+            algorithm = []
+            if det.golden_layout is not None and getattr(det.golden_layout, 'size', 0):
+                for cfg in det.symbols:
+                    item = cfg['item']
+                    templ = det.templates.get(item)
+                    center = det.expected_centers.get(item)
+                    threshold = float(cfg.get('shape_threshold', cfg.get('presence_threshold', 0.56)))
+                    if templ is None or center is None:
+                        algorithm.append({'item': item, 'passed': False, 'reason': 'template/center unavailable'})
+                        rc = max(rc, 5)
+                        continue
+                    roi, origin = det._search_roi(det.golden_layout, center, cfg)
+                    score, scale, loc, size = det._best_match(roi, templ, cfg.get('detect_scales') or det.DEFAULT_SCALES)
+                    roi_center = det._center_norm(loc, size, roi.shape) if size != (0,0) else None
+                    actual_center = det._roi_center_to_full(roi_center, origin, roi.shape, det.golden_layout.shape)
+                    pos_pass, pos_err = det._position_result(actual_center, center, cfg)
+                    passed = bool(score >= threshold and pos_pass)
+                    algorithm.append({
+                        'item': item, 'passed': passed, 'shape_score': round(float(score),4),
+                        'shape_threshold': threshold, 'position_pass': bool(pos_pass),
+                        'position_error': round(float(pos_err),4), 'scale': float(scale),
+                    })
+                    if not passed:
+                        rc = max(rc, 5)
+            else:
+                rc = max(rc, 5)
             payload['profiles'].append({
                 'file': p.name,
                 'profile_name': profile.get('profile_name',''),
                 'required': required,
                 'loaded': loaded,
                 'missing': missing,
+                'resource_status': status,
+                'golden_algorithm_check': algorithm,
             })
             if missing:
-                rc = 3
+                rc = max(rc, 3)
         payload['passed'] = rc == 0 and bool(payload['profiles'])
         if not payload['passed'] and rc == 0:
             rc = 4

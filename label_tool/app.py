@@ -218,7 +218,7 @@ class App(tk.Tk):
         for c in cols:
             self.live_tree.heading(c,text=c.title()); self.live_tree.column(c,width=widths[c],anchor="w")
         self.live_tree.pack(fill="both",expand=True)
-        for tag,color in [("LOCK","#e8f5e9"),("VERIFY","#e3f2fd"),("SCANNING","#fff8e1"),("CONFIRMED_FAIL","#ffebee"),("VERIFY_FAIL","#fff3e0")]:
+        for tag,color in [("LOCK","#e8f5e9"),("VERIFY","#e3f2fd"),("SCANNING","#fff8e1"),("CONFIRMED_FAIL","#ffebee"),("VERIFY_FAIL","#fff3e0"),("RESOURCE_ERROR","#ffcdd2")]:
             self.live_tree.tag_configure(tag,background=color)
 
     def _build_image_tab(self):
@@ -270,6 +270,8 @@ class App(tk.Tk):
         )
         self._reset_live_tree()
         self._update_zone_ui()
+        art_status=self.zone_ocr.artwork.resource_status()
+        log.info('ARTWORK_RESOURCE_STATUS profile=%s status=%s',name,art_status)
         log.info('PROFILE_LOADED name=%s file=%s',name,path)
 
     def _build_worker_snapshot(self, target):
@@ -363,6 +365,18 @@ class App(tk.Tk):
     def _draw_target_overlay(self, display):
         rect,title=self._active_scan()
         if rect is None or display is None:return display
+
+        # V1.7.4: Artwork guide is activated ONLY for a production zone that
+        # actually contains Artwork items. Earlier OCR/Barcode zones keep the
+        # lightweight rectangle path and are not charged artwork CPU time.
+        if self._production_mode():
+            zone=self._current_production_zone()
+            if zone and any(str(x).startswith("Artwork: ") for x in zone.items):
+                try:
+                    return self.zone_ocr.artwork.draw_alignment_overlay(display)
+                except Exception as exc:
+                    if self.live_session:self.live_session.debug.exception('ARTWORK_OVERLAY_FAIL err=%s',exc)
+
         h,w=display.shape[:2]; x1,y1,x2,y2=rect
         p1=(int(x1*w),int(y1*h)); p2=(int(x2*w),int(y2*h))
         state=self._target_state()
@@ -448,9 +462,14 @@ class App(tk.Tk):
             self.preview_job=self.after(50,self._update_preview)
 
     def autofocus(self):
-        ok,val=self.camera.autofocus(True)
-        log.info('AUTOFOCUS set_ok=%s readback=%s',ok,val)
-        messagebox.showinfo('Auto Focus',f'Set={ok}\nReadback={val}')
+        started=time.perf_counter()
+        ok,val,elapsed,err=self.camera.autofocus(True,retrigger=True)
+        total=(time.perf_counter()-started)*1000.0
+        log.info('AUTOFOCUS_RETRIGGER set_ok=%s readback=%s camera_ms=%.1f total_ms=%.1f err=%s',ok,val,elapsed,total,err)
+        if self.live_session:
+            self.live_session.execution.info('AUTOFOCUS_RETRIGGER set_ok=%s readback=%s camera_ms=%.1f total_ms=%.1f err=%s',ok,val,elapsed,total,err)
+            self.live_session.debug.info('CAMERA_COMMAND autofocus_retrigger ok=%s readback=%s camera_ms=%.1f total_ms=%.1f err=%s',ok,val,elapsed,total,err)
+        messagebox.showinfo('Auto Focus',f'Retrigger={ok}\nReadback={val}\nCamera time={elapsed:.0f} ms'+(f'\nError={err}' if err else ''))
 
 
 
@@ -494,7 +513,7 @@ class App(tk.Tk):
     def _current_production_zone(self):
         if not self.production_scheduler or self.locks is None:
             return None
-        return self.production_scheduler.select_next_incomplete(self.locks)
+        return self.production_scheduler.current_for_display(self.locks)
 
     def _active_scan(self):
         if self._production_mode():
@@ -577,8 +596,19 @@ class App(tk.Tk):
     def retry_guided_item(self):
         self.guided_ocr_var.set("OCR: --"); self.guided_quality_var.set("Target: retry requested")
         if self._production_mode():
-            z=self.production_scheduler.retry(); self._update_zone_ui()
-            if self.live_session and z:self.live_session.execution.info("ZONE_MANUAL_RETRY zone=%s",z.id)
+            z=self.production_scheduler.retry()
+            reset=0
+            if z and self.locks is not None:
+                items=self.production_scheduler.effective_items(z,self.locks)
+                reset=self.locks.retry_items(items)
+                for name in items:
+                    if name in self.locks.fields and not self.locks.is_locked(name) and self.live_tree.exists(name):
+                        exp=self.__dict__.setdefault("report_expected",{}).get(name,"")
+                        self.live_tree.item(name,values=(name,'',exp,self.locks.status_text(name),'Manual Retry Zone'),tags=('SCANNING',))
+            self._update_zone_ui()
+            if self.live_session and z:
+                self.live_session.execution.info("ZONE_MANUAL_RETRY zone=%s reset_unfinished=%s",z.id,reset)
+                self.live_session.debug.info("ZONE_MANUAL_RETRY_RESET zone=%s reset_unfinished=%s",z.id,reset)
         elif self.guided_scheduler:
             t=self.guided_scheduler.retry(); self._update_zone_ui()
             if self.live_session and t:self.live_session.execution.info("GUIDED_MANUAL_RETRY item=%s",t.item)
@@ -594,6 +624,8 @@ class App(tk.Tk):
         self.live_session=LiveInspectionSession('live_records',self.profile_var.get())
         if self.last_frame is not None:self.live_session.save_image('first_frame.jpg',self.last_frame)
         self.live_active=True; self.live_btn.config(text='Stop Live Scan'); self.live_state_var.set('Live: SCANNING')
+        if self._production_mode() and self.production_scheduler:
+            self.production_scheduler.resume_auto()
         current=(self._current_production_zone().id if self._production_mode() and self._current_production_zone() else (self._current_guided_target().item if self._current_guided_target() else '-'))
         self.live_session.execution.info('LIVE_SCAN_START required=%d mode=%s current=%s',len(self.locks.required_items),self.ocr_mode_var.get(),current)
         self._update_zone_ui()
@@ -784,6 +816,13 @@ class App(tk.Tk):
             self.live_session.test.info("CAMERA_RUNTIME_PASS backend=%s stats=%s", self.camera.backend_name, stats)
         except Exception as exc:
             self.live_session.test.exception("CAMERA_RUNTIME_FAIL err=%s", exc)
+        try:
+            art_status=self.zone_ocr.artwork.resource_status()
+            ok=not art_status.get("missing") and (not art_status.get("enabled") or art_status.get("golden_layout_loaded"))
+            self.live_session.test.info("ARTWORK_RESOURCE_RUNTIME_%s status=%s", 'PASS' if ok else 'FAIL', art_status)
+            self.live_session.debug.info("ARTWORK_RESOURCE_PATH_DUMP status=%s", art_status)
+        except Exception as exc:
+            self.live_session.test.exception("ARTWORK_RESOURCE_RUNTIME_FAIL err=%s", exc)
 
     @staticmethod
     def _ocr_smoke_image():
@@ -1034,8 +1073,11 @@ class App(tk.Tk):
                     base_incomplete=item in self.locks.fields and not self.locks.is_locked(item)
                     dep_incomplete=(item=='Variable: P/N Format' and 'Work Order: P/N' in self.locks.fields and not self.locks.is_locked('Work Order: P/N')) or (item=='Variable: Made in Format' and 'Work Order: Made in' in self.locks.fields and not self.locks.is_locked('Work Order: Made in'))
                     if base_incomplete or dep_incomplete:requested.append(item)
-                if self.live_session:self.live_session.debug.info('ZONE_WORKER_SNAPSHOT cycle=%s zone=%s requested=%s',self.live_cycle,zone.id,requested)
-                threading.Thread(target=self._zone_worker,args=(frame,zone_snapshot,known_snapshot,expected_snapshot,requested,self.live_cycle),daemon=True,name='MultiFieldZoneOCRWorker').start()
+                if self.live_session:self.live_session.debug.info('ZONE_WORKER_SNAPSHOT cycle=%s zone=%s requested=%s manual_hold=%s',self.live_cycle,zone.id,requested,self.production_scheduler.manual_hold)
+                if requested:
+                    threading.Thread(target=self._zone_worker,args=(frame,zone_snapshot,known_snapshot,expected_snapshot,requested,self.live_cycle),daemon=True,name='MultiFieldZoneOCRWorker').start()
+                else:
+                    self.live_busy=False
             elif self.live_busy:self.dropped_busy_cycles+=1
             interval=int(self.engine.profile.get('live',{}).get('zone_scan_interval_ms',500))
             self.live_job=self.after(interval,self._schedule_live); return
@@ -1188,6 +1230,14 @@ class App(tk.Tk):
                 self.live_session.debug.info('ZONE_RULE_EVAL cycle=%s zone=%s item=%s status=%s actual=%s expected=%s message=%s',cycle_id,zid,name,row.status,value,row.expected,row.message)
                 if name.startswith('Artwork: '):
                     self.live_session.test.info('ARTWORK_CHECK cycle=%s zone=%s item=%s status=%s actual=%s expected=%s message=%s',cycle_id,zid,name,row.status,value,row.expected,row.message)
+            if getattr(row,'error_code','')=='ART-TEMPLATE-MISSING':
+                if self.live_tree.exists(name):
+                    self.live_tree.item(name,values=(name,'RESOURCE ERROR',row.expected,'RESOURCE ERROR',row.message),tags=('RESOURCE_ERROR',))
+                self.live_state_var.set('Live: RESOURCE ERROR - Golden Artwork missing/unreadable')
+                if self.live_session:
+                    self.live_session.execution.error('ARTWORK_RESOURCE_ERROR zone=%s item=%s message=%s',zid,name,row.message)
+                    self.live_session.debug.error('ARTWORK_RESOURCE_ERROR zone=%s item=%s message=%s',zid,name,row.message)
+                continue
             state=self.locks.offer(name,value,row.status,row.message,source=f'Zone OCR {zid}')
             if self.live_tree.exists(name):self.live_tree.item(name,values=(name,value,row.expected,self.locks.status_text(name),row.message),tags=(state,))
             if self.live_session:

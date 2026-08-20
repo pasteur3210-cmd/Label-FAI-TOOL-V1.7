@@ -5,25 +5,24 @@ from pathlib import Path
 import logging
 import sys
 import time
+import threading
 
 import cv2
 import numpy as np
 
 from .models import FieldResult
-from .preprocess import detect_label
+from .preprocess import detect_label, order_points
 
 log = logging.getLogger(__name__)
 
 
 def artwork_dir_candidates() -> list[Path]:
-    """Return artwork resource candidates in deterministic priority order.
+    """Candidate artwork roots, ordered from field-service external to bundle.
 
-    V1.7.3 supports source mode, PyInstaller one-folder mode, _internal layouts,
-    and an explicit external ``golden_artwork`` folder copied beside the EXE.
+    V1.7.4 does *not* select one root globally. Each template is resolved and
+    decoded independently so one stale/partial folder cannot hide a valid copy.
     """
     candidates: list[Path] = []
-
-    # External folder beside executable (preferred field-service location).
     exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
     if exe_dir is not None:
         candidates.extend([
@@ -31,8 +30,6 @@ def artwork_dir_candidates() -> list[Path]:
             exe_dir / "label_tool" / "golden_artwork",
             exe_dir / "_internal" / "label_tool" / "golden_artwork",
         ])
-
-    # PyInstaller extraction / internal bundle path.
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         root = Path(meipass)
@@ -40,26 +37,60 @@ def artwork_dir_candidates() -> list[Path]:
             root / "golden_artwork",
             root / "label_tool" / "golden_artwork",
         ])
-
-    # Source-tree fallback.
     candidates.append(Path(__file__).resolve().parents[1] / "golden_artwork")
 
-    # Deduplicate while preserving order.
     unique: list[Path] = []
     seen = set()
     for p in candidates:
-        key = str(p.resolve()) if p.exists() else str(p)
+        key = str(p)
         if key not in seen:
             seen.add(key)
             unique.append(p)
     return unique
 
 
+def _imread_gray_unicode(path: Path):
+    """Unicode/space-safe image load on Windows.
+
+    cv2.imread has historically varied across Windows/OpenCV builds for Unicode
+    paths. np.fromfile + cv2.imdecode avoids that dependency and also works for
+    ordinary ASCII paths.
+    """
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+        if data.size:
+            img = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+            if img is not None and img.size:
+                return img
+    except Exception:
+        pass
+    try:
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        return img if img is not None and img.size else None
+    except Exception:
+        return None
+
+
+def resolve_artwork_file(relative_path: str):
+    """Resolve one artwork file independently and return (image, path, audit)."""
+    rel = str(relative_path or "").replace("\\", "/").strip("/")
+    audit = []
+    for root in artwork_dir_candidates():
+        path = root / rel
+        exists = path.exists() and path.is_file()
+        img = _imread_gray_unicode(path) if exists else None
+        loaded = bool(img is not None and getattr(img, "size", 0))
+        audit.append({"path": str(path), "exists": exists, "loaded": loaded})
+        if loaded:
+            return img, path, audit
+    return None, None, audit
+
+
 def bundled_artwork_dir() -> Path:
+    """Compatibility helper used by legacy tests/tools."""
     for p in artwork_dir_candidates():
         if p.exists() and p.is_dir():
             return p
-    # Keep deterministic fallback so missing-resource logs show the expected path.
     return artwork_dir_candidates()[0]
 
 
@@ -81,22 +112,19 @@ class ArtworkDetection:
 
 
 class ArtworkPresenceDetector:
-    """V1.7.2 Golden Artwork shape + relative-position detector.
+    """V1.7.4 registered ROI artwork inspection.
 
-    Acceptance:
-      * required artwork shape is detected
-      * detected artwork is at the expected position relative to the label
+    Production acceptance:
+      * shape is correct
+      * relative position is correct
+      * printed size is NOT judged
 
-    Explicitly NOT judged:
-      * printed artwork size
-      * camera pixel size / camera-to-label distance
-      * inter-symbol spacing as a separate requirement
-
-    Scale search is used only to make shape recognition tolerant of camera distance;
-    ``best_scale`` is diagnostic data and is never an acceptance criterion.
+    Flow:
+      full frame -> label registration -> normalized label -> expected ROI ->
+      multi-scale shape match -> relative-position decision.
     """
 
-    DEFAULT_SCALES = [0.35, 0.45, 0.55, 0.65, 0.75, 0.90, 1.00, 1.15, 1.35, 1.60, 1.90, 2.20]
+    DEFAULT_SCALES = [0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.72,0.75,0.85,0.90,1.00,1.15,1.25,1.35,1.40,1.60,1.90,2.20]
 
     def __init__(self, profile: dict):
         self.set_profile(profile)
@@ -109,14 +137,30 @@ class ArtworkPresenceDetector:
         self.require_label_alignment = bool(art.get("require_label_alignment", True))
         self.position_tolerance = art.get("position_tolerance", [0.12, 0.12]) or [0.12, 0.12]
         self.position_tolerance = (float(self.position_tolerance[0]), float(self.position_tolerance[1]))
+        self.search_roi_expand = float(art.get("search_roi_expand", 1.35))
+        self.label_alignment_min_score = float(art.get("label_alignment_min_score", 0.70))
         self.symbols = []
-        self.templates = {}
+        self.templates: dict[str, np.ndarray] = {}
+        self.template_paths: dict[str, str] = {}
+        self.resource_errors: dict[str, list] = {}
         self.expected_centers: dict[str, tuple[float, float]] = {}
+        self.expected_boxes: dict[str, tuple[float, float, float, float]] = {}
+        self._overlay_lock = threading.Lock()
+        self._last_alignment_box = None
+        self._last_alignment_score = 0.0
+        self._last_alignment_ok = False
+        self._last_alignment_at = 0.0
 
-        root = bundled_artwork_dir()
-        log.info("ARTWORK_RESOURCE_ROOT selected=%s candidates=%s", root, [str(p) for p in artwork_dir_candidates()])
         layout_rel = str(art.get("golden_layout", "")).strip()
-        self.golden_layout = cv2.imread(str(root / layout_rel), cv2.IMREAD_GRAYSCALE) if layout_rel else None
+        self.golden_layout = None
+        self.golden_layout_path = ""
+        if layout_rel:
+            img, path, audit = resolve_artwork_file(layout_rel)
+            self.golden_layout = img
+            self.golden_layout_path = str(path or "")
+            if img is None:
+                self.resource_errors["__golden_layout__"] = audit
+            log.info("ARTWORK_LAYOUT_RESOLVE rel=%s selected=%s audit=%s", layout_rel, path, audit)
 
         for raw in art.get("symbols", []) or []:
             if not raw.get("required", False):
@@ -125,23 +169,34 @@ class ArtworkPresenceDetector:
             item = str(cfg.get("item") or f"Artwork: {cfg.get('name', cfg.get('id', 'Symbol'))}")
             cfg["item"] = item
             self.symbols.append(cfg)
-            path = root / str(cfg.get("template", ""))
-            log.info("ARTWORK_TEMPLATE_CHECK item=%s path=%s exists=%s", item, path, path.exists())
-            if path.exists():
-                templ = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-                if templ is not None and templ.size:
-                    self.templates[item] = self._trim_template(templ)
-                    log.info("ARTWORK_TEMPLATE_LOADED item=%s shape=%s", item, self.templates[item].shape)
+            rel = str(cfg.get("template", ""))
+            templ, path, audit = resolve_artwork_file(rel)
+            log.info("ARTWORK_TEMPLATE_RESOLVE item=%s rel=%s selected=%s audit=%s", item, rel, path, audit)
+            if templ is not None:
+                self.templates[item] = self._trim_template(templ)
+                self.template_paths[item] = str(path)
+            else:
+                self.resource_errors[item] = audit
 
-        self._calibrate_expected_centers()
+        self._calibrate_expected_geometry()
+
+    def resource_status(self):
+        required = [cfg["item"] for cfg in self.symbols]
+        loaded = [x for x in required if x in self.templates]
+        missing = [x for x in required if x not in self.templates]
+        return {
+            "enabled": self.enabled,
+            "required": required,
+            "loaded": loaded,
+            "missing": missing,
+            "golden_layout_loaded": bool(self.golden_layout is not None and getattr(self.golden_layout, "size", 0)),
+            "golden_layout_path": self.golden_layout_path,
+            "template_paths": dict(self.template_paths),
+            "errors": dict(self.resource_errors),
+        }
 
     @staticmethod
     def _trim_template(templ):
-        """Remove white page margin around a golden symbol.
-
-        V1.7.1 matched the original crop including margin.  That made the score
-        highly sensitive to real camera background and was a major field issue.
-        """
         gray = templ if templ.ndim == 2 else cv2.cvtColor(templ, cv2.COLOR_BGR2GRAY)
         _, ink = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY_INV)
         pts = cv2.findNonZero(ink)
@@ -159,8 +214,6 @@ class ArtworkPresenceDetector:
         if gray.ndim == 3:
             gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        # Otsu is substantially more stable than V1.7.1 adaptive thresholding
-        # for black artwork printed on a white label under uneven camera light.
         _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         return bw
 
@@ -170,6 +223,13 @@ class ArtworkPresenceDetector:
         w, h = size
         fh, fw = frame_shape[:2]
         return ((x + w / 2.0) / max(fw, 1), (y + h / 2.0) / max(fh, 1))
+
+    @staticmethod
+    def _box_norm(loc, size, frame_shape):
+        x, y = loc
+        w, h = size
+        fh, fw = frame_shape[:2]
+        return (x / max(fw, 1), y / max(fh, 1), (x + w) / max(fw, 1), (y + h) / max(fh, 1))
 
     def _best_match(self, frame, templ, scales):
         search = self._binary(frame)
@@ -193,28 +253,55 @@ class ArtworkPresenceDetector:
         score, scale, loc, size = best
         return max(0.0, score), scale, loc, size
 
-    def _calibrate_expected_centers(self):
-        """Locate every symbol on the supplied Golden Label Example.
-
-        This avoids hand-entering pixel coordinates. Expected positions come
-        from the same source-spec artwork supplied by the user.
-        """
+    def _calibrate_expected_geometry(self):
         if self.golden_layout is None or not getattr(self.golden_layout, "size", 0):
             return
         for cfg in self.symbols:
             item = cfg["item"]
-            # Explicit profile center wins if later engineering calibration is needed.
-            center = cfg.get("expected_center")
-            if center and len(center) == 2:
-                self.expected_centers[item] = (float(center[0]), float(center[1]))
-                continue
             templ = self.templates.get(item)
             if templ is None:
                 continue
-            scales = cfg.get("golden_calibration_scales") or [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70, 0.80, 0.90, 1.00]
+            scales = cfg.get("golden_calibration_scales") or [0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.70,0.80,0.90,1.00,1.15]
             score, _scale, loc, size = self._best_match(self.golden_layout, templ, scales)
-            self.expected_centers[item] = self._center_norm(loc, size, self.golden_layout.shape)
-            log.debug("ARTWORK_GOLDEN_CAL item=%s score=%.3f center=(%.4f,%.4f)", item, score, *self.expected_centers[item])
+            auto_center = self._center_norm(loc, size, self.golden_layout.shape)
+            auto_box = self._box_norm(loc, size, self.golden_layout.shape)
+            center = cfg.get("expected_center")
+            expected_center = (float(center[0]), float(center[1])) if center and len(center)==2 else auto_center
+            self.expected_centers[item] = expected_center
+            # Keep the Golden symbol's display footprint, but center it on the
+            # authoritative expected_center so the operator ghost guide and
+            # the inspection position gate use the same coordinate system.
+            bw = auto_box[2]-auto_box[0]; bh = auto_box[3]-auto_box[1]
+            bx1=max(0.0,expected_center[0]-bw/2); by1=max(0.0,expected_center[1]-bh/2)
+            bx2=min(1.0,expected_center[0]+bw/2); by2=min(1.0,expected_center[1]+bh/2)
+            self.expected_boxes[item] = (bx1,by1,bx2,by2)
+            log.debug("ARTWORK_GOLDEN_CAL item=%s score=%.3f center=%s box=%s", item, score, self.expected_centers[item], self.expected_boxes[item])
+
+    def _search_roi(self, normalized, expected_center, cfg):
+        """Return ROI and its normalized origin around expected symbol position."""
+        if expected_center is None:
+            return normalized, (0.0, 0.0)
+        tol = cfg.get("position_tolerance", self.position_tolerance)
+        tx, ty = float(tol[0]), float(tol[1])
+        half_x = min(0.48, max(0.07, tx * self.search_roi_expand))
+        half_y = min(0.48, max(0.07, ty * self.search_roi_expand))
+        cx, cy = expected_center
+        x1n, y1n = max(0.0, cx-half_x), max(0.0, cy-half_y)
+        x2n, y2n = min(1.0, cx+half_x), min(1.0, cy+half_y)
+        h, w = normalized.shape[:2]
+        x1, y1 = int(x1n*w), int(y1n*h)
+        x2, y2 = max(x1+8, int(x2n*w)), max(y1+8, int(y2n*h))
+        return normalized[y1:y2, x1:x2], (x1n, y1n)
+
+    @staticmethod
+    def _roi_center_to_full(center_roi, origin, roi_shape, full_shape):
+        if center_roi is None:
+            return None
+        ry, rx = roi_shape[:2]
+        fy, fx = full_shape[:2]
+        x = origin[0] + center_roi[0] * (rx / max(fx, 1))
+        y = origin[1] + center_roi[1] * (ry / max(fy, 1))
+        return (float(x), float(y))
 
     def _position_result(self, actual, expected, cfg):
         if actual is None or expected is None:
@@ -223,23 +310,27 @@ class ArtworkPresenceDetector:
         tx, ty = float(tol[0]), float(tol[1])
         dx = abs(float(actual[0]) - float(expected[0]))
         dy = abs(float(actual[1]) - float(expected[1]))
-        # normalized error: <=1 means inside the rectangular tolerance window
         err = max(dx / max(tx, 1e-6), dy / max(ty, 1e-6))
         return bool(dx <= tx and dy <= ty), float(err)
 
     def _normalize_label(self, frame):
         corrected, confidence, box = detect_label(frame, self.profile)
-        aligned = box is not None and confidence > 0.0
-        if aligned:
-            return corrected, True, float(confidence)
-        return frame, False, float(confidence)
+        aligned = box is not None and float(confidence) >= self.label_alignment_min_score
+        return (corrected if aligned else frame), aligned, float(confidence), box
 
     def evaluate(self, frame, requested_items=None):
         requested = None if requested_items is None else set(requested_items)
         if not self.enabled or frame is None or getattr(frame, "size", 0) == 0:
             return [], []
+        if requested is not None and not requested:
+            return [], []
 
-        normalized, label_aligned, label_score = self._normalize_label(frame)
+        normalized, label_aligned, label_score, _box = self._normalize_label(frame)
+        with self._overlay_lock:
+            self._last_alignment_box = None if _box is None else np.asarray(_box, dtype=np.float32).copy()
+            self._last_alignment_score = float(label_score)
+            self._last_alignment_ok = bool(label_aligned)
+            self._last_alignment_at = time.time()
         rows = []
         detections = []
 
@@ -253,78 +344,154 @@ class ArtworkPresenceDetector:
             expected_center = self.expected_centers.get(item)
 
             if templ is None:
+                audit = self.resource_errors.get(item, [])
                 rows.append(FieldResult(
                     name=item, actual="", expected="Shape + relative position",
-                    status="FAIL", message="Golden artwork template missing",
+                    status="ERROR", message=f"Golden artwork template missing; audit={audit}",
                     error_code="ART-TEMPLATE-MISSING"
                 ))
                 detections.append(ArtworkDetection(item, str(cfg.get("id", "")), False, 0.0, threshold, 1.0))
                 continue
 
+            # Invalid presentation is NOT an NG observation. This prevents the
+            # operator moving the label into place from accumulating FAIL 1/3..3/3.
+            if self.require_label_alignment and not label_aligned:
+                elapsed = (time.perf_counter()-started)*1000.0
+                msg = f"label_align=NO score={label_score:.3f}; ALIGN LABEL; size ignored; {elapsed:.1f}ms"
+                rows.append(FieldResult(
+                    name=item, actual="", expected=f"Shape>={threshold:.2f}; relative position; size ignored",
+                    status="WARN", message=msg, error_code="ART-LABEL-NOT-ALIGNED"
+                ))
+                detections.append(ArtworkDetection(
+                    item=item, symbol_id=str(cfg.get("id", "")), present=False,
+                    score=0.0, threshold=threshold, best_scale=1.0,
+                    expected_center=expected_center, label_aligned=False, elapsed_ms=elapsed,
+                ))
+                continue
+
+            search_roi, origin = self._search_roi(normalized, expected_center, cfg)
             scales = cfg.get("detect_scales") or self.DEFAULT_SCALES
-            score, best_scale, loc, size = self._best_match(normalized, templ, scales)
-            actual_center = self._center_norm(loc, size, normalized.shape) if size != (0, 0) else None
+            score, best_scale, loc, size = self._best_match(search_roi, templ, scales)
+            roi_center = self._center_norm(loc, size, search_roi.shape) if size != (0, 0) else None
+            actual_center = self._roi_center_to_full(roi_center, origin, search_roi.shape, normalized.shape)
             shape_pass = score >= threshold
             position_pass, pos_error = self._position_result(actual_center, expected_center, cfg)
-            if self.require_label_alignment and not label_aligned:
-                position_pass = False
             present = bool(shape_pass and position_pass)
             elapsed = (time.perf_counter() - started) * 1000.0
 
-            if not label_aligned and self.require_label_alignment:
-                reason = "label alignment not available; keep entire label visible"
-                code = "ART-LABEL-NOT-ALIGNED"
-            elif not shape_pass:
-                reason = "shape below threshold"
-                code = "ART-SHAPE-NG"
+            if not shape_pass:
+                reason, code, actual = "shape below threshold", "ART-SHAPE-NG", "Shape NG"
             elif not position_pass:
-                reason = "relative position outside tolerance"
-                code = "ART-POSITION-NG"
+                reason, code, actual = "relative position outside tolerance", "ART-POSITION-NG", "Shape PASS / Position NG"
             else:
-                reason = "shape and relative position OK"
-                code = ""
+                reason, code, actual = "shape and relative position OK", "", "Shape+Position PASS"
 
-            if present:
-                actual = "Shape+Position PASS"
-            elif not label_aligned and self.require_label_alignment:
-                # Do not confirm NG while the operator has not presented the complete label.
-                actual = ""
-            elif shape_pass and not position_pass:
-                # Stable semantic value allows SmartLock to confirm a real position NG.
-                actual = "Shape PASS / Position NG"
-            else:
-                # Complete, aligned label but wrong/missing artwork shape: confirm NG after
-                # the existing fail_confirmations gate instead of scanning forever.
-                actual = "Shape NG"
             exp = f"Shape>={threshold:.2f}; relative position; size ignored"
             ac = actual_center or (-1.0, -1.0)
             ec = expected_center or (-1.0, -1.0)
             msg = (
-                f"shape={score:.3f}/{threshold:.2f}; "
-                f"pos={'PASS' if position_pass else 'FAIL'}; "
+                f"shape={score:.3f}/{threshold:.2f}; pos={'PASS' if position_pass else 'FAIL'}; "
                 f"actual=({ac[0]:.3f},{ac[1]:.3f}); expected=({ec[0]:.3f},{ec[1]:.3f}); "
                 f"pos_err={pos_error:.2f}; scale={best_scale:.2f}(ignored); "
-                f"label_align={'YES' if label_aligned else 'NO'} score={label_score:.3f}; "
+                f"label_align=YES score={label_score:.3f}; roi_origin=({origin[0]:.3f},{origin[1]:.3f}); "
                 f"{reason}; {elapsed:.1f}ms"
             )
             rows.append(FieldResult(
                 name=item, actual=actual, expected=exp,
                 status="PASS" if present else "FAIL", message=msg, error_code=code
             ))
-            det = ArtworkDetection(
+            detections.append(ArtworkDetection(
                 item=item, symbol_id=str(cfg.get("id", "")), present=present,
                 score=score, threshold=threshold, best_scale=best_scale,
                 shape_pass=shape_pass, position_pass=position_pass,
                 position_error=pos_error, actual_center=actual_center,
-                expected_center=expected_center, label_aligned=label_aligned,
+                expected_center=expected_center, label_aligned=True,
                 elapsed_ms=elapsed,
-            )
-            detections.append(det)
-            log.debug(
-                "ARTWORK_EVAL item=%s final=%s shape=%.3f threshold=%.3f shape_pass=%s position_pass=%s "
-                "actual=%s expected=%s pos_error=%.3f scale=%.2f size_ignored=YES label_aligned=%s label_score=%.3f ms=%.1f",
-                item, "PASS" if present else "FAIL", score, threshold, shape_pass,
-                position_pass, actual_center, expected_center, pos_error, best_scale,
-                label_aligned, label_score, elapsed,
-            )
+            ))
+            log.debug("ARTWORK_EVAL item=%s final=%s %s", item, "PASS" if present else "FAIL", msg)
         return rows, detections
+
+    def _template_contour_normalized(self, item):
+        templ = self.templates.get(item)
+        if templ is None:
+            return None
+        bw = self._binary(templ)
+        contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        # combine meaningful external contours; tiny specks are dropped
+        keep = [c for c in contours if cv2.contourArea(c) >= max(2.0, 0.0005*bw.size)]
+        if not keep:
+            keep = [max(contours, key=cv2.contourArea)]
+        pts = np.vstack(keep).reshape(-1,2).astype(np.float32)
+        pts[:,0] /= max(templ.shape[1]-1,1)
+        pts[:,1] /= max(templ.shape[0]-1,1)
+        return pts
+
+    def draw_alignment_overlay(self, frame):
+        """Draw a Golden ghost/contour operator guide on the camera preview.
+
+        The guide is display-only. It helps placement/rotation but its apparent
+        size is never used as an acceptance criterion.
+        """
+        if frame is None or not self.enabled:
+            return frame
+        display = frame
+        with self._overlay_lock:
+            box = None if self._last_alignment_box is None else self._last_alignment_box.copy()
+            score = float(self._last_alignment_score)
+            alignment_ok = bool(self._last_alignment_ok)
+            age = time.time() - float(self._last_alignment_at or 0.0)
+        # Registration runs only in the artwork worker. Never do expensive
+        # detect_label work on the Tk preview thread.
+        if age > 1.5:
+            box = None
+            score = 0.0
+            alignment_ok = False
+        h, w = display.shape[:2]
+
+        if box is None:
+            ratio = 1.8
+            if self.golden_layout is not None and self.golden_layout.shape[0] > 0:
+                ratio = self.golden_layout.shape[1] / self.golden_layout.shape[0]
+            gw = int(w*0.78); gh = int(gw/max(ratio,0.2))
+            if gh > int(h*0.72):
+                gh = int(h*0.72); gw = int(gh*ratio)
+            x1=(w-gw)//2; y1=(h-gh)//2
+            ordered=np.array([[x1,y1],[x1+gw,y1],[x1+gw,y1+gh],[x1,y1+gh]],dtype=np.float32)
+            color=(0,180,255)
+            header="ALIGN ENTIRE LABEL TO GOLDEN CONTOUR"
+        else:
+            ordered = order_points(np.asarray(box,dtype=np.float32))
+            if alignment_ok:
+                color=(0,200,0)
+                header=f"LABEL ALIGNED | Artwork guide | size check OFF | reg={score:.2f}"
+            else:
+                color=(0,180,255)
+                header=f"ALIGNMENT NOT READY | keep entire label visible | reg={score:.2f}/{self.label_alignment_min_score:.2f}"
+
+        cv2.polylines(display,[ordered.astype(np.int32)],True,color,3,cv2.LINE_AA)
+        src = np.array([[0,0],[1,0],[1,1],[0,1]],dtype=np.float32)
+        H = cv2.getPerspectiveTransform(src, ordered.astype(np.float32))
+
+        for cfg in self.symbols:
+            item = cfg["item"]
+            center = self.expected_centers.get(item)
+            boxn = self.expected_boxes.get(item)
+            contour = self._template_contour_normalized(item)
+            if center is None or contour is None:
+                continue
+            if boxn is None:
+                bx1,by1,bx2,by2 = center[0]-0.06,center[1]-0.04,center[0]+0.06,center[1]+0.04
+            else:
+                bx1,by1,bx2,by2 = boxn
+            pts = contour.copy()
+            pts[:,0] = bx1 + pts[:,0]*(bx2-bx1)
+            pts[:,1] = by1 + pts[:,1]*(by2-by1)
+            proj = cv2.perspectiveTransform(pts.reshape(-1,1,2),H).reshape(-1,2).astype(np.int32)
+            if len(proj) >= 2:
+                cv2.polylines(display,[proj],True,color,2,cv2.LINE_AA)
+
+        cv2.rectangle(display,(8,8),(min(w-8,1120),52),(0,0,0),-1)
+        cv2.putText(display,header,(18,38),cv2.FONT_HERSHEY_SIMPLEX,0.66,color,2,cv2.LINE_AA)
+        return display

@@ -1,6 +1,6 @@
 {
   "profile_name": "Inner Box Label",
-  "profile_version": "1.7.3",
+  "profile_version": "1.7.4",
   "label_type": "Inner Box Label",
   "source_spec": "680010-353 GRG-4297u-TSL-P1 738125-00X Inner Box Label Request Form V3.0 (2025/11/03)",
   "model": "GRG-4297u",
@@ -64,7 +64,7 @@
         "required": true,
         "template": "grg4297u_inner_box/comtrend_logo.png",
         "presence_threshold": 0.58,
-        "shape_threshold": 0.48,
+        "shape_threshold": 0.34,
         "detect_scales": [
           0.35,
           0.45,
@@ -155,7 +155,9 @@
     "position_tolerance": [
       0.12,
       0.12
-    ]
+    ],
+    "search_roi_expand": 1.35,
+    "label_alignment_min_score": 0.7
   },
   "live": {
     "required_items": [

@@ -43,6 +43,18 @@ class SmartLockEngine:
         self.fields[name] = ItemLock()
         return True
 
+    def retry_items(self, names) -> int:
+        """Reset only unfinished candidates for a manual Retry Zone action.
+
+        Existing LOCK results are terminal and intentionally preserved.
+        """
+        count=0
+        for name in names or []:
+            if name in self.fields and not self.is_locked(name):
+                self.fields[name]=ItemLock()
+                count+=1
+        return count
+
     def is_locked(self, name: str) -> bool:
         return name in self.fields and self.fields[name].state == "LOCK"
 
