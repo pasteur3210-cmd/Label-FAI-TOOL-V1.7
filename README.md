@@ -1,21 +1,22 @@
-# Label Auto Inspection Tool V1.7.2
+# Label Auto Inspection Tool V1.7.3
 
-Default OCR Mode: Production 4-Zone.
+GitHub Build Ready repository.
 
-- Zone A: Basic Information
-- Zone B: Wi-Fi Information
-- Zone C: Device Identity
-- Zone D: Compliance / Bottom Label
+## Profiles
+- Chassis Label
+- Inner Box Label
 
-Each zone shows every field with LOCK / PASS 1/2 / Searching status. Fields lock independently. When all fields in a zone lock, the program advances automatically.
+Both profiles support Artwork shape + relative-position verification.
+Artwork printed size is intentionally not judged.
 
-Use `Manual Item Debug` when engineering needs the old V1.5.3 one-item target workflow.
+## Build
+GitHub Actions workflow: `.github/workflows/build.yml`
 
-After Overall PASS the session folder contains:
-- result.json
-- Label_Inspection_Report_<session>.xlsx
-- execution.log / test.log / debug.log / performance.log / lock_history.log
-- images/ and target_ocr/
-
-## V1.7.2 Artwork update
-Inner Box Artwork inspection now judges **shape + relative position** after full-label normalization. Printed artwork size is intentionally ignored. Keep the entire Inner Box Label visible in Zone C so relative position can be evaluated. Detailed Artwork diagnostics are recorded in session debug/test logs.
+V1.7.3 adds:
+- robust Golden Artwork runtime resource discovery;
+- external `golden_artwork` copy beside packaged EXE;
+- packaged EXE Artwork resource smoke test;
+- Chassis Label Artwork checks: COMTREND, Recycling, RoHS, CE, WEEE;
+- Inner Box Label Artwork checks: COMTREND, Recycling, CE, WEEE;
+- profile dropdown names simplified to `Chassis Label` and `Inner Box Label`;
+- fix: empty Artwork request no longer evaluates all Artwork.

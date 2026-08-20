@@ -15,7 +15,7 @@ class V170MultiLabelProfilesTests(unittest.TestCase):
         cls.inner=json.loads(cls.path.read_text(encoding="utf-8"))
 
     def test_inner_box_profile_identity(self):
-        self.assertEqual(self.inner["profile_name"],"GRG-4297u-TSL-P1 - Inner Box Label")
+        self.assertEqual(self.inner["profile_name"],"Inner Box Label")
         self.assertEqual(self.inner["label_type"],"Inner Box Label")
         self.assertEqual(self.inner["label_pn"],"680010-353")
         self.assertEqual(self.inner["blank_label_pn"],"502109-180")
