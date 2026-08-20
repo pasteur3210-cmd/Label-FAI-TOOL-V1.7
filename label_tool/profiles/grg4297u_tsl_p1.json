@@ -1,6 +1,6 @@
 {
-  "profile_name": "GRG-4297u-TSL-P1",
-  "profile_version": "1.7.2",
+  "profile_name": "Chassis Label",
+  "profile_version": "1.7.3",
   "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
   "fixed_fields": {
     "model": "GRG-4297u",
@@ -192,7 +192,12 @@
       "Variable: WiFi Key Format",
       "Variable: WiFi QR Format",
       "Consistency: QR SSID vs Printed SSID",
-      "Consistency: QR Key vs Printed WiFi Key"
+      "Consistency: QR Key vs Printed WiFi Key",
+      "Artwork: COMTREND Logo",
+      "Artwork: Recycling Mark",
+      "Artwork: RoHS Mark",
+      "Artwork: CE Mark",
+      "Artwork: WEEE Mark"
     ],
     "preview_interval_ms": 50,
     "latest_frame_only": true,
@@ -409,8 +414,8 @@
       },
       {
         "id": "D",
-        "title": "ZONE D - Compliance / Bottom Label",
-        "instruction": "請將 Made in / Comtrend Central Europe 地址 / CLASS 1 LASER PRODUCT 區域完整放入黃色區域。",
+        "title": "ZONE D - Compliance / Artwork",
+        "instruction": "請將完整 Chassis Label 保持在 Camera 可見範圍；程式檢查 Made in / 地址 / CLASS 1 LASER PRODUCT，並判定 COMTREND / Recycling / RoHS / CE / WEEE 的形狀與相對位置。圖形尺寸大小不判定。",
         "target_rect": [
           0.06,
           0.14,
@@ -420,7 +425,12 @@
         "items": [
           "Variable: Made in Format",
           "Fixed: Comtrend Central Europe address",
-          "Fixed: CLASS 1 LASER PRODUCT"
+          "Fixed: CLASS 1 LASER PRODUCT",
+          "Artwork: COMTREND Logo",
+          "Artwork: Recycling Mark",
+          "Artwork: RoHS Mark",
+          "Artwork: CE Mark",
+          "Artwork: WEEE Mark"
         ]
       }
     ],
@@ -428,5 +438,107 @@
     "production_hide_ocr_zoom": true,
     "production_compact_zone_status": true
   },
-  "label_type": "Chassis Label"
+  "label_type": "Chassis Label",
+  "artwork_verification": {
+    "status": "ENABLED_SHAPE_POSITION",
+    "enabled": true,
+    "blocking": true,
+    "mode": "shape_position",
+    "golden_source": "680010-378 Chassis Label Request Form V3.0 page 4 Label Example",
+    "golden_layout": "grg4297u_chassis/golden_layout.png",
+    "require_label_alignment": true,
+    "position_tolerance": [
+      0.13,
+      0.13
+    ],
+    "judged_dimensions": {
+      "category_presence": true,
+      "shape": true,
+      "position": true,
+      "size": false,
+      "spacing": false
+    },
+    "symbols": [
+      {
+        "id": "comtrend_logo",
+        "name": "COMTREND Logo",
+        "item": "Artwork: COMTREND Logo",
+        "required": true,
+        "template": "grg4297u_chassis/comtrend_logo.png",
+        "shape_threshold": 0.4,
+        "position_tolerance": [
+          0.16,
+          0.12
+        ],
+        "expected_center": [
+          0.203,
+          0.048
+        ]
+      },
+      {
+        "id": "recycling_mark",
+        "name": "Recycling Mark",
+        "item": "Artwork: Recycling Mark",
+        "required": true,
+        "template": "grg4297u_chassis/recycling_mark.png",
+        "shape_threshold": 0.42,
+        "position_tolerance": [
+          0.12,
+          0.12
+        ],
+        "expected_center": [
+          0.573,
+          0.547
+        ]
+      },
+      {
+        "id": "rohs_mark",
+        "name": "RoHS Lead-free Mark",
+        "item": "Artwork: RoHS Mark",
+        "required": true,
+        "template": "grg4297u_chassis/rohs_mark.png",
+        "shape_threshold": 0.42,
+        "position_tolerance": [
+          0.12,
+          0.12
+        ],
+        "expected_center": [
+          0.689,
+          0.538
+        ]
+      },
+      {
+        "id": "ce_mark",
+        "name": "CE Mark",
+        "item": "Artwork: CE Mark",
+        "required": true,
+        "template": "grg4297u_chassis/ce_mark.png",
+        "shape_threshold": 0.42,
+        "position_tolerance": [
+          0.12,
+          0.12
+        ],
+        "expected_center": [
+          0.804,
+          0.538
+        ]
+      },
+      {
+        "id": "weee_mark",
+        "name": "WEEE crossed-out wheeled bin",
+        "item": "Artwork: WEEE Mark",
+        "required": true,
+        "template": "grg4297u_chassis/weee_mark.png",
+        "shape_threshold": 0.4,
+        "position_tolerance": [
+          0.12,
+          0.13
+        ],
+        "expected_center": [
+          0.921,
+          0.521
+        ]
+      }
+    ]
+  }
 }

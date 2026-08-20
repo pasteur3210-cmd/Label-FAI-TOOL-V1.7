@@ -15,10 +15,52 @@ from .preprocess import detect_label
 log = logging.getLogger(__name__)
 
 
+def artwork_dir_candidates() -> list[Path]:
+    """Return artwork resource candidates in deterministic priority order.
+
+    V1.7.3 supports source mode, PyInstaller one-folder mode, _internal layouts,
+    and an explicit external ``golden_artwork`` folder copied beside the EXE.
+    """
+    candidates: list[Path] = []
+
+    # External folder beside executable (preferred field-service location).
+    exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
+    if exe_dir is not None:
+        candidates.extend([
+            exe_dir / "golden_artwork",
+            exe_dir / "label_tool" / "golden_artwork",
+            exe_dir / "_internal" / "label_tool" / "golden_artwork",
+        ])
+
+    # PyInstaller extraction / internal bundle path.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        root = Path(meipass)
+        candidates.extend([
+            root / "golden_artwork",
+            root / "label_tool" / "golden_artwork",
+        ])
+
+    # Source-tree fallback.
+    candidates.append(Path(__file__).resolve().parents[1] / "golden_artwork")
+
+    # Deduplicate while preserving order.
+    unique: list[Path] = []
+    seen = set()
+    for p in candidates:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    return unique
+
+
 def bundled_artwork_dir() -> Path:
-    if getattr(sys, "_MEIPASS", None):
-        return Path(sys._MEIPASS) / "label_tool" / "golden_artwork"
-    return Path(__file__).resolve().parents[1] / "golden_artwork"
+    for p in artwork_dir_candidates():
+        if p.exists() and p.is_dir():
+            return p
+    # Keep deterministic fallback so missing-resource logs show the expected path.
+    return artwork_dir_candidates()[0]
 
 
 @dataclass
@@ -72,6 +114,7 @@ class ArtworkPresenceDetector:
         self.expected_centers: dict[str, tuple[float, float]] = {}
 
         root = bundled_artwork_dir()
+        log.info("ARTWORK_RESOURCE_ROOT selected=%s candidates=%s", root, [str(p) for p in artwork_dir_candidates()])
         layout_rel = str(art.get("golden_layout", "")).strip()
         self.golden_layout = cv2.imread(str(root / layout_rel), cv2.IMREAD_GRAYSCALE) if layout_rel else None
 
@@ -83,10 +126,12 @@ class ArtworkPresenceDetector:
             cfg["item"] = item
             self.symbols.append(cfg)
             path = root / str(cfg.get("template", ""))
+            log.info("ARTWORK_TEMPLATE_CHECK item=%s path=%s exists=%s", item, path, path.exists())
             if path.exists():
                 templ = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
                 if templ is not None and templ.size:
                     self.templates[item] = self._trim_template(templ)
+                    log.info("ARTWORK_TEMPLATE_LOADED item=%s shape=%s", item, self.templates[item].shape)
 
         self._calibrate_expected_centers()
 
@@ -190,7 +235,7 @@ class ArtworkPresenceDetector:
         return frame, False, float(confidence)
 
     def evaluate(self, frame, requested_items=None):
-        requested = set(requested_items or [])
+        requested = None if requested_items is None else set(requested_items)
         if not self.enabled or frame is None or getattr(frame, "size", 0) == 0:
             return [], []
 
@@ -200,7 +245,7 @@ class ArtworkPresenceDetector:
 
         for cfg in self.symbols:
             item = cfg["item"]
-            if requested and item not in requested:
+            if requested is not None and item not in requested:
                 continue
             started = time.perf_counter()
             threshold = float(cfg.get("shape_threshold", cfg.get("presence_threshold", 0.56)))
