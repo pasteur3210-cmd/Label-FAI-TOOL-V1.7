@@ -22,7 +22,7 @@ class V176ChassisLaserAndReportTests(unittest.TestCase):
     def test_report_accepts_incomplete_chassis_session(self):
         out=Path('test_v176_incomplete_report.xlsx')
         payload={
-          'overall':'INCOMPLETE','software_version':'1.7.6','profile':'Chassis Label',
+          'overall':'INCOMPLETE','software_version':'1.7.6.1','profile':'Chassis Label',
           'model':'GRG-4297u','label_type':'Chassis Label','label_pn':'680010-378',
           'spec_version':'V3.0','source_spec':'test','session_id':'TEST','started_at':'2026-08-20T18:00:00',
           'completed_at':'2026-08-20T18:01:00','elapsed_sec':60,'locked_count':31,'required_count':32,

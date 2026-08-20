@@ -1,6 +1,6 @@
 {
   "profile_name": "Chassis Label",
-  "profile_version": "1.7.6",
+  "profile_version": "1.7.6.1",
   "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
   "fixed_fields": {
     "model": "GRG-4297u",
@@ -88,7 +88,7 @@
     "V1.7.0 multi-label profile architecture: profile-driven custom OCR targets allow additional label types without rewriting the core scheduler.",
     "V1.7.5 Artwork operator guide uses whole-label outline plus broad anchors; small-logo contour matching is machine-only.",
     "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds.",
-    "V1.7.6 Chassis CLASS 1 LASER PRODUCT uses normalized-label targeted OCR; session Excel is saved on PASS and manual stop/incomplete runs."
+    "V1.7.6.1 Chassis CLASS 1 LASER PRODUCT uses normalized-label targeted OCR; session Excel is saved on PASS and manual stop/incomplete runs."
   ],
   "model": "GRG-4297u",
   "label_pn": "680010-378",

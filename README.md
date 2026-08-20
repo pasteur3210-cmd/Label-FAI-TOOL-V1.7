@@ -1,4 +1,4 @@
-# Label Auto Inspection Tool V1.7.6
+# Label Auto Inspection Tool V1.7.6.1
 
 GitHub Build Ready repository.
 
@@ -8,7 +8,7 @@ GitHub Build Ready repository.
 
 Both profiles support Artwork shape + relative-position verification. Printed Artwork size remains **not judged**.
 
-## V1.7.6 main changes
+## V1.7.6.1 main changes
 - Artwork still runs only in the active Artwork production zone; OCR/Barcode zones remain on the original fast path.
 - Chassis/Inner Box operator guide changed from many small symbol contours to a stable whole-label outline plus 3 broad anchors.
 - The operator guide is static and does not jump with each registration candidate. It is placement guidance only, not a size gauge.

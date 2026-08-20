@@ -8,6 +8,7 @@ from .direct_guided_ocr import (
     best_line_similarity
 )
 from .artwork_presence import ArtworkPresenceDetector
+from .models import FieldResult
 
 
 @dataclass
