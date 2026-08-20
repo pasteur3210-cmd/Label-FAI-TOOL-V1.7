@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 import time
 
 from .direct_guided_ocr import (
-    DirectGuidedOCR, DEFAULT_TARGETS, targets_from_profile, crop_relative, sharpness
+    DirectGuidedOCR, DEFAULT_TARGETS, targets_from_profile, crop_relative, sharpness,
+    best_line_similarity
 )
 from .artwork_presence import ArtworkPresenceDetector
 
@@ -186,12 +187,14 @@ class MultiFieldZoneOCR:
         self.profile=profile
         self.direct=DirectGuidedOCR(profile,ocr_backend=ocr_backend)
         self._target_by_item={t.item:t for t in targets_from_profile(profile)}
+        self._normalized_text_targets={str(x.get("item")):dict(x) for x in (profile.get("live",{}).get("normalized_text_targets",[]) or []) if x.get("item")}
         self.artwork=ArtworkPresenceDetector(profile)
 
     def set_profile(self, profile: dict):
         self.profile=profile
         self.direct.set_profile(profile)
         self._target_by_item={t.item:t for t in targets_from_profile(profile)}
+        self._normalized_text_targets={str(x.get("item")):dict(x) for x in (profile.get("live",{}).get("normalized_text_targets",[]) or []) if x.get("item")}
         self.artwork.set_profile(profile)
 
     def set_ocr_backend(self, backend):
@@ -208,13 +211,42 @@ class MultiFieldZoneOCR:
         artwork_items=[x for x in eval_items if x.startswith("Artwork: ")]
         art_rows,_=self.artwork.evaluate(frame,artwork_items)
 
+        # V1.7.6: profile-defined normalized-label OCR for small fixed phrases.
+        # This is intentionally used only for configured items (currently
+        # Chassis CLASS 1 LASER PRODUCT) so the fast OCR/Barcode path is not
+        # affected in other zones or profiles.
+        normalized_rows=[]
+        normalized_pass=[]
+        normalized_items=[x for x in eval_items if x in self._normalized_text_targets]
+        if normalized_items:
+            normalized, aligned, align_score, _box = self.artwork._normalize_label(frame)
+            for item in normalized_items:
+                cfg=self._normalized_text_targets[item]
+                rect=list(cfg.get("target_rect",[0.30,0.54,0.76,0.71]))
+                target_img=crop_relative(normalized,rect)
+                tsh=sharpness(target_img) if target_img is not None and getattr(target_img,"size",0) else 0.0
+                expected=str(cfg.get("expected",item.replace("Fixed: ","")))
+                threshold=float(cfg.get("threshold",0.72))
+                min_sh=float(cfg.get("min_sharpness",18.0))
+                if not aligned:
+                    normalized_rows.append(FieldResult(name=item,actual="",expected=expected,status="WARN",message=f"Normalized target waiting for label alignment score={align_score:.3f}",error_code="TXT-LABEL-NOT-ALIGNED"))
+                elif tsh < min_sh:
+                    normalized_rows.append(FieldResult(name=item,actual="",expected=expected,status="WARN",message=f"Normalized target blur sharpness={tsh:.1f}<{min_sh:.1f}",error_code="TXT-TARGET-BLUR"))
+                else:
+                    txt,_=self.direct.ocr.read(target_img)
+                    score,best=best_line_similarity(txt,expected)
+                    ok=score>=threshold
+                    normalized_rows.append(FieldResult(name=item,actual="Present" if ok else (best or txt or ""),expected=expected,status="PASS" if ok else "WARN",message=f"Normalized-label OCR similarity={score:.3f}; align={align_score:.3f}; sharpness={tsh:.1f}",error_code="" if ok else "TXT-NORMALIZED-NOT-MATCHED"))
+                    if ok:
+                        normalized_pass.append(item)
+
         roi=crop_relative(frame,zone.target_rect)
         sh=sharpness(roi) if roi is not None and getattr(roi,"size",0) else 0.0
-        rows=list(art_rows)
-        pass_items=[r.name for r in art_rows if r.status=="PASS"]
+        rows=list(art_rows)+list(normalized_rows)
+        pass_items=[r.name for r in art_rows if r.status=="PASS"]+list(normalized_pass)
         raw_text=""
 
-        text_items=[x for x in eval_items if not x.startswith("Artwork: ")]
+        text_items=[x for x in eval_items if not x.startswith("Artwork: ") and x not in self._normalized_text_targets]
         ocr_ready=bool(roi is not None and getattr(roi,"size",0) and sh>=min_sharpness)
         if text_items and ocr_ready:
             raw_text,_=self.direct.ocr.read(roi)

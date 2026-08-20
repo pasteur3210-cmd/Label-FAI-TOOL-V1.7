@@ -1,6 +1,6 @@
 {
   "profile_name": "Chassis Label",
-  "profile_version": "1.7.5",
+  "profile_version": "1.7.6",
   "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
   "fixed_fields": {
     "model": "GRG-4297u",
@@ -87,7 +87,8 @@
     "V1.6.2 GUI fix: Zone guidance moved into the right result pane; Production mode hides OCR Target Zoom and uses compact zone status so the full Camera preview retains usable height.",
     "V1.7.0 multi-label profile architecture: profile-driven custom OCR targets allow additional label types without rewriting the core scheduler.",
     "V1.7.5 Artwork operator guide uses whole-label outline plus broad anchors; small-logo contour matching is machine-only.",
-    "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds."
+    "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds.",
+    "V1.7.6 Chassis CLASS 1 LASER PRODUCT uses normalized-label targeted OCR; session Excel is saved on PASS and manual stop/incomplete runs."
   ],
   "model": "GRG-4297u",
   "label_pn": "680010-378",
@@ -438,7 +439,22 @@
     ],
     "camera_preview_priority_layout": true,
     "production_hide_ocr_zoom": true,
-    "production_compact_zone_status": true
+    "production_compact_zone_status": true,
+    "normalized_text_targets": [
+      {
+        "item": "Fixed: CLASS 1 LASER PRODUCT",
+        "expected": "CLASS 1 LASER PRODUCT",
+        "target_rect": [
+          0.3,
+          0.54,
+          0.76,
+          0.71
+        ],
+        "threshold": 0.72,
+        "min_sharpness": 18,
+        "mode": "fuzzy"
+      }
+    ]
   },
   "label_type": "Chassis Label",
   "artwork_verification": {

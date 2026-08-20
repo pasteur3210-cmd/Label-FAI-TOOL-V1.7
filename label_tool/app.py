@@ -634,7 +634,54 @@ class App(tk.Tk):
         self._schedule_machine_read()
         self._start_ocr_preflight_async()
 
+    def _build_session_report_payload(self, overall: str, completed=None):
+        if not self.live_session or self.locks is None:
+            return None
+        completed = completed or datetime.now()
+        elapsed=(completed-self.live_session.started_at).total_seconds()
+        return {
+            "overall":overall,
+            "software_version":__version__,
+            "profile":self.profile_var.get(),
+            "model":self.engine.profile.get("model",""),
+            "label_type":self.engine.profile.get("label_type",""),
+            "label_pn":self.engine.profile.get("label_pn",""),
+            "spec_version":self.engine.profile.get("spec_version",""),
+            "source_spec":self.engine.profile.get("source_spec",""),
+            "artwork_verification_status":self.engine.profile.get("artwork_verification",{}).get("status","NOT_CONFIGURED"),
+            "session_id":self.live_session.session_id,
+            "started_at":self.live_session.started_at.isoformat(timespec="seconds"),
+            "work_order":self._expected(),
+            "locks":self.locks.snapshot(),
+            "locked_count":self.locks.locked_count(),
+            "required_count":len(self.locks.required_items),
+            "zone_stats":self.zone_stats,
+            "expected_map":self.report_expected,
+            "ocr_mode":self.ocr_mode_var.get(),
+            "elapsed_sec":round(elapsed,1),
+            "completed_at":completed.isoformat(timespec="seconds"),
+            "confirmed_fail_items":self.locks.confirmed_fail_items(),
+            "unlocked_items":self.locks.unlocked_items(),
+        }
+
     def stop_live(self):
+        # V1.7.6: every real inspection session gets traceable result + Excel,
+        # even when the operator stops before all fields LOCK.  V1.7.5 only
+        # wrote Excel on overall PASS, which is why the incomplete Chassis run
+        # had no workbook while the Inner Box PASS run did.
+        session_to_save=self.live_session
+        should_save=bool(session_to_save and not self.auto_saved and self.locks is not None)
+        if should_save:
+            fails=self.locks.confirmed_fail_items()
+            overall='CONFIRMED_FAIL' if fails else ('PASS' if self.locks.all_locked() else 'INCOMPLETE')
+            payload=self._build_session_report_payload(overall)
+            if self.last_frame is not None:
+                session_to_save.save_image('final_stop.jpg',self.last_frame)
+            if payload:
+                session_to_save.save_result(payload)
+                report=session_to_save.save_excel_report(payload)
+                session_to_save.test.info('SESSION_REPORT_ON_STOP overall=%s locked=%s required=%s unlocked=%s report=%s',overall,payload.get('locked_count'),payload.get('required_count'),payload.get('unlocked_items'),report)
+                self.auto_saved=True
         self.live_active=False; self.live_btn.config(text='Start Live Scan'); self.live_state_var.set('Live: STOPPED')
         if self.live_job:
             try:self.after_cancel(self.live_job)
@@ -1438,29 +1485,7 @@ class App(tk.Tk):
                 self.auto_saved=True
                 self.live_session.save_image("final_pass.jpg",frame)
                 completed=datetime.now()
-                elapsed=(completed-self.live_session.started_at).total_seconds()
-                payload={
-                    "overall":"PASS",
-                    "software_version":__version__,
-                    "profile":self.profile_var.get(),
-                    "model":self.engine.profile.get("model",""),
-                    "label_type":self.engine.profile.get("label_type",""),
-                    "label_pn":self.engine.profile.get("label_pn",""),
-                    "spec_version":self.engine.profile.get("spec_version",""),
-                    "source_spec":self.engine.profile.get("source_spec",""),
-                    "artwork_verification_status":self.engine.profile.get("artwork_verification",{}).get("status","NOT_CONFIGURED"),
-                    "session_id":self.live_session.session_id,
-                    "started_at":self.live_session.started_at.isoformat(timespec="seconds"),
-                    "work_order":self._expected(),
-                    "locks":self.locks.snapshot(),
-                    "locked_count":locked,
-                    "required_count":total,
-                    "zone_stats":self.zone_stats,
-                    "expected_map":self.report_expected,
-                    "ocr_mode":self.ocr_mode_var.get(),
-                    "elapsed_sec":round(elapsed,1),
-                    "completed_at":completed.isoformat(timespec="seconds")
-                }
+                payload=self._build_session_report_payload("PASS",completed)
                 self.live_session.save_result(payload)
                 report=self.live_session.save_excel_report(payload)
                 if report:self.status_var.set(f"PASS | Excel Report: {report}")

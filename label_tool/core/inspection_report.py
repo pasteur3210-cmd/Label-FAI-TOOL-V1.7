@@ -40,6 +40,8 @@ def create_inspection_report(path, payload: dict):
         ("Locked / Required",f"{payload.get('locked_count','')} / {payload.get('required_count','')}"),
         ("Work Order P/N",payload.get("work_order",{}).get("pn","")),
         ("Made in",payload.get("work_order",{}).get("made_in","")),
+        ("Unfinished Items",", ".join(payload.get("unlocked_items",[]) or [])),
+        ("Confirmed Fail Items",", ".join(payload.get("confirmed_fail_items",[]) or [])),
     ]
     for i,(k,v) in enumerate(info,2):
         summary.write(i-1,0,k,fmt_label)
