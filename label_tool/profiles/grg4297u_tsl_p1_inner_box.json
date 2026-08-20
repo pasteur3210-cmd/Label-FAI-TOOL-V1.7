@@ -1,6 +1,6 @@
 {
   "profile_name": "Inner Box Label",
-  "profile_version": "1.7.4",
+  "profile_version": "1.7.5",
   "label_type": "Inner Box Label",
   "source_spec": "680010-353 GRG-4297u-TSL-P1 738125-00X Inner Box Label Request Form V3.0 (2025/11/03)",
   "model": "GRG-4297u",
@@ -41,7 +41,9 @@
     "The Label Example on page 2 is registered as the Golden Artwork source.",
     "V1.7.2 Artwork Check judges symbol shape and position relative to the Golden Label Example.",
     "Artwork printed size is intentionally NOT judged. Multi-scale search is recognition tolerance only.",
-    "For position judgment the whole Inner Box Label must be visible so the label can be normalized."
+    "For position judgment the whole Inner Box Label must be visible so the label can be normalized.",
+    "V1.7.5 Artwork operator guide uses whole-label outline plus broad anchors; small-logo contour matching is machine-only.",
+    "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds."
   ],
   "artwork_verification": {
     "status": "ENABLED_SHAPE_POSITION",
@@ -157,7 +159,46 @@
       0.12
     ],
     "search_roi_expand": 1.35,
-    "label_alignment_min_score": 0.7
+    "label_alignment_min_score": 0.7,
+    "guide_mode": "outer_anchors",
+    "position_pass_ratio": 0.85,
+    "position_fail_ratio": 1.15,
+    "shape_verify_margin": 0.05,
+    "registration_vision": {
+      "label_long_short_ratio": 2.05,
+      "label_expand_margin": 1.02
+    },
+    "guide_anchors": [
+      {
+        "label": "BASIC",
+        "rect": [
+          0.03,
+          0.04,
+          0.46,
+          0.42
+        ]
+      },
+      {
+        "label": "IDENTITY",
+        "rect": [
+          0.45,
+          0.03,
+          0.98,
+          0.55
+        ]
+      },
+      {
+        "label": "ARTWORK",
+        "rect": [
+          0.55,
+          0.56,
+          0.98,
+          0.96
+        ]
+      }
+    ],
+    "guide_aspect_ratio": 2.05,
+    "guide_width_ratio": 0.78
   },
   "live": {
     "required_items": [

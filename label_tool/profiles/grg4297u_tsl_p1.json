@@ -1,6 +1,6 @@
 {
   "profile_name": "Chassis Label",
-  "profile_version": "1.7.4",
+  "profile_version": "1.7.5",
   "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
   "fixed_fields": {
     "model": "GRG-4297u",
@@ -85,7 +85,9 @@
     "FastMachineReader, SmartLock, CameraManager, Parser, OCR runtime, WorkerBus and DirectGuidedOCR remain protected.",
     "V1.6.1 build-quality fix: GitHub static gate now targets Ruff F821 undefined names; four unused imports were removed without changing inspection logic.",
     "V1.6.2 GUI fix: Zone guidance moved into the right result pane; Production mode hides OCR Target Zoom and uses compact zone status so the full Camera preview retains usable height.",
-    "V1.7.0 multi-label profile architecture: profile-driven custom OCR targets allow additional label types without rewriting the core scheduler."
+    "V1.7.0 multi-label profile architecture: profile-driven custom OCR targets allow additional label types without rewriting the core scheduler.",
+    "V1.7.5 Artwork operator guide uses whole-label outline plus broad anchors; small-logo contour matching is machine-only.",
+    "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds."
   ],
   "model": "GRG-4297u",
   "label_pn": "680010-378",
@@ -540,7 +542,48 @@
         ]
       }
     ],
-    "search_roi_expand": 1.35,
-    "label_alignment_min_score": 0.7
+    "search_roi_expand": 1.15,
+    "label_alignment_min_score": 0.7,
+    "guide_mode": "outer_anchors",
+    "position_pass_ratio": 0.85,
+    "position_fail_ratio": 1.15,
+    "shape_verify_margin": 0.08,
+    "registration_vision": {
+      "label_long_short_ratio": 1.55,
+      "label_expand_margin": 1.08,
+      "label_expand_x": 1.55,
+      "label_expand_y": 2.35
+    },
+    "guide_anchors": [
+      {
+        "label": "BASIC / LOGO",
+        "rect": [
+          0.03,
+          0.03,
+          0.5,
+          0.34
+        ]
+      },
+      {
+        "label": "IDENTITY",
+        "rect": [
+          0.5,
+          0.02,
+          0.98,
+          0.46
+        ]
+      },
+      {
+        "label": "COMPLIANCE",
+        "rect": [
+          0.52,
+          0.44,
+          0.98,
+          0.72
+        ]
+      }
+    ],
+    "guide_aspect_ratio": 1.67,
+    "guide_width_ratio": 0.72
   }
 }

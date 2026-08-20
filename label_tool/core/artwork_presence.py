@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 def artwork_dir_candidates() -> list[Path]:
     """Candidate artwork roots, ordered from field-service external to bundle.
 
-    V1.7.4 does *not* select one root globally. Each template is resolved and
+    V1.7.5 does *not* select one root globally. Each template is resolved and
     decoded independently so one stale/partial folder cannot hide a valid copy.
     """
     candidates: list[Path] = []
@@ -109,10 +109,12 @@ class ArtworkDetection:
     expected_center: tuple[float, float] | None = None
     label_aligned: bool = False
     elapsed_ms: float = 0.0
+    shape_state: str = "FAIL"
+    position_state: str = "FAIL"
 
 
 class ArtworkPresenceDetector:
-    """V1.7.4 registered ROI artwork inspection.
+    """V1.7.5 registered ROI artwork inspection with stable decisions.
 
     Production acceptance:
       * shape is correct
@@ -139,6 +141,16 @@ class ArtworkPresenceDetector:
         self.position_tolerance = (float(self.position_tolerance[0]), float(self.position_tolerance[1]))
         self.search_roi_expand = float(art.get("search_roi_expand", 1.35))
         self.label_alignment_min_score = float(art.get("label_alignment_min_score", 0.70))
+        # V1.7.5 stability gates: a small dead-band avoids frame-to-frame
+        # PASS/FAIL flipping when camera noise lands exactly on one threshold.
+        self.shape_verify_margin = float(art.get("shape_verify_margin", 0.04))
+        self.position_pass_ratio = float(art.get("position_pass_ratio", 0.90))
+        self.position_fail_ratio = float(art.get("position_fail_ratio", 1.10))
+        self.guide_mode = str(art.get("guide_mode", "outer_anchors"))
+        self.guide_anchors = list(art.get("guide_anchors", []) or [])
+        self.guide_aspect_ratio = float(art.get("guide_aspect_ratio", 0.0) or 0.0)
+        self.guide_width_ratio = float(art.get("guide_width_ratio", 0.76))
+        self.registration_vision = dict(art.get("registration_vision", {}) or {})
         self.symbols = []
         self.templates: dict[str, np.ndarray] = {}
         self.template_paths: dict[str, str] = {}
@@ -303,18 +315,46 @@ class ArtworkPresenceDetector:
         y = origin[1] + center_roi[1] * (ry / max(fy, 1))
         return (float(x), float(y))
 
-    def _position_result(self, actual, expected, cfg):
+    def _position_state(self, actual, expected, cfg):
+        """Return (state, normalized_error) with hysteresis dead-band."""
         if actual is None or expected is None:
-            return False, 999.0
+            return "FAIL", 999.0
         tol = cfg.get("position_tolerance", self.position_tolerance)
         tx, ty = float(tol[0]), float(tol[1])
         dx = abs(float(actual[0]) - float(expected[0]))
         dy = abs(float(actual[1]) - float(expected[1]))
         err = max(dx / max(tx, 1e-6), dy / max(ty, 1e-6))
-        return bool(dx <= tx and dy <= ty), float(err)
+        pass_ratio = float(cfg.get("position_pass_ratio", self.position_pass_ratio))
+        fail_ratio = float(cfg.get("position_fail_ratio", self.position_fail_ratio))
+        if err <= pass_ratio:
+            return "PASS", float(err)
+        if err >= fail_ratio:
+            return "FAIL", float(err)
+        return "VERIFY", float(err)
+
+    def _position_result(self, actual, expected, cfg):
+        """Legacy compatibility: return strict boolean + normalized error."""
+        state, err = self._position_state(actual, expected, cfg)
+        return state == "PASS", err
+
+    def _shape_result(self, score, threshold, cfg):
+        margin = float(cfg.get("shape_verify_margin", self.shape_verify_margin))
+        fail_threshold = float(cfg.get("shape_fail_threshold", max(0.0, threshold - margin)))
+        if score >= threshold:
+            return "PASS"
+        if score <= fail_threshold:
+            return "FAIL"
+        return "VERIFY"
 
     def _normalize_label(self, frame):
-        corrected, confidence, box = detect_label(frame, self.profile)
+        # Artwork registration has its own vision calibration. This keeps the
+        # Chassis near-square Golden layout tuning isolated from the OCR/Barcode
+        # pipeline, so Zone A/B/C text performance is not changed by Artwork.
+        reg_profile = self.profile
+        if self.registration_vision:
+            reg_profile = dict(self.profile)
+            reg_profile["vision"] = dict(self.registration_vision)
+        corrected, confidence, box = detect_label(frame, reg_profile)
         aligned = box is not None and float(confidence) >= self.label_alignment_min_score
         return (corrected if aligned else frame), aligned, float(confidence), box
 
@@ -374,23 +414,28 @@ class ArtworkPresenceDetector:
             score, best_scale, loc, size = self._best_match(search_roi, templ, scales)
             roi_center = self._center_norm(loc, size, search_roi.shape) if size != (0, 0) else None
             actual_center = self._roi_center_to_full(roi_center, origin, search_roi.shape, normalized.shape)
-            shape_pass = score >= threshold
-            position_pass, pos_error = self._position_result(actual_center, expected_center, cfg)
+            shape_state = self._shape_result(score, threshold, cfg)
+            position_state, pos_error = self._position_state(actual_center, expected_center, cfg)
+            shape_pass = shape_state == "PASS"
+            position_pass = position_state == "PASS"
             present = bool(shape_pass and position_pass)
+            verifying = (shape_state == "VERIFY" or position_state == "VERIFY") and not present
             elapsed = (time.perf_counter() - started) * 1000.0
 
-            if not shape_pass:
-                reason, code, actual = "shape below threshold", "ART-SHAPE-NG", "Shape NG"
-            elif not position_pass:
-                reason, code, actual = "relative position outside tolerance", "ART-POSITION-NG", "Shape PASS / Position NG"
+            if present:
+                reason, code, actual, status = "shape and relative position OK", "", "Shape+Position PASS", "PASS"
+            elif verifying:
+                reason, code, actual, status = "borderline observation; hold previous state", "ART-VERIFY", "VERIFY", "WARN"
+            elif shape_state == "FAIL":
+                reason, code, actual, status = "shape below stable fail band", "ART-SHAPE-NG", "Shape NG", "FAIL"
             else:
-                reason, code, actual = "shape and relative position OK", "", "Shape+Position PASS"
+                reason, code, actual, status = "relative position outside stable tolerance", "ART-POSITION-NG", "Shape PASS / Position NG", "FAIL"
 
             exp = f"Shape>={threshold:.2f}; relative position; size ignored"
             ac = actual_center or (-1.0, -1.0)
             ec = expected_center or (-1.0, -1.0)
             msg = (
-                f"shape={score:.3f}/{threshold:.2f}; pos={'PASS' if position_pass else 'FAIL'}; "
+                f"shape={score:.3f}/{threshold:.2f} state={shape_state}; pos={position_state}; "
                 f"actual=({ac[0]:.3f},{ac[1]:.3f}); expected=({ec[0]:.3f},{ec[1]:.3f}); "
                 f"pos_err={pos_error:.2f}; scale={best_scale:.2f}(ignored); "
                 f"label_align=YES score={label_score:.3f}; roi_origin=({origin[0]:.3f},{origin[1]:.3f}); "
@@ -398,7 +443,7 @@ class ArtworkPresenceDetector:
             )
             rows.append(FieldResult(
                 name=item, actual=actual, expected=exp,
-                status="PASS" if present else "FAIL", message=msg, error_code=code
+                status=status, message=msg, error_code=code
             ))
             detections.append(ArtworkDetection(
                 item=item, symbol_id=str(cfg.get("id", "")), present=present,
@@ -406,9 +451,9 @@ class ArtworkPresenceDetector:
                 shape_pass=shape_pass, position_pass=position_pass,
                 position_error=pos_error, actual_center=actual_center,
                 expected_center=expected_center, label_aligned=True,
-                elapsed_ms=elapsed,
+                elapsed_ms=elapsed, shape_state=shape_state, position_state=position_state,
             ))
-            log.debug("ARTWORK_EVAL item=%s final=%s %s", item, "PASS" if present else "FAIL", msg)
+            log.debug("ARTWORK_EVAL item=%s final=%s %s", item, status, msg)
         return rows, detections
 
     def _template_contour_normalized(self, item):
@@ -450,7 +495,28 @@ class ArtworkPresenceDetector:
             alignment_ok = False
         h, w = display.shape[:2]
 
-        if box is None:
+        if self.guide_mode == "outer_anchors":
+            # Stable operator target: the guide no longer jumps with every
+            # registration candidate. This is deliberately a placement aid,
+            # not a printed-size gauge. The backend still judges only shape
+            # and relative position.
+            ratio = self.guide_aspect_ratio
+            if ratio <= 0.1 and self.golden_layout is not None and self.golden_layout.shape[0] > 0:
+                ratio = self.golden_layout.shape[1] / self.golden_layout.shape[0]
+            if ratio <= 0.1:
+                ratio = 1.8
+            gw = int(w * min(max(self.guide_width_ratio, 0.45), 0.90))
+            gh = int(gw / max(ratio, 0.2))
+            if gh > int(h*0.72):
+                gh = int(h*0.72); gw = int(gh*ratio)
+            x1=(w-gw)//2; y1=(h-gh)//2
+            ordered=np.array([[x1,y1],[x1+gw,y1],[x1+gw,y1+gh],[x1,y1+gh]],dtype=np.float32)
+            color=(0,200,0) if alignment_ok else (0,180,255)
+            if alignment_ok:
+                header=f"LABEL READY | machine checks Golden ROI | size check OFF | reg={score:.2f}"
+            else:
+                header=f"PLACE WHOLE LABEL INSIDE GUIDE | align 3 large anchors | reg={score:.2f}/{self.label_alignment_min_score:.2f}"
+        elif box is None:
             ratio = 1.8
             if self.golden_layout is not None and self.golden_layout.shape[0] > 0:
                 ratio = self.golden_layout.shape[1] / self.golden_layout.shape[0]
@@ -460,7 +526,7 @@ class ArtworkPresenceDetector:
             x1=(w-gw)//2; y1=(h-gh)//2
             ordered=np.array([[x1,y1],[x1+gw,y1],[x1+gw,y1+gh],[x1,y1+gh]],dtype=np.float32)
             color=(0,180,255)
-            header="ALIGN ENTIRE LABEL TO GOLDEN CONTOUR"
+            header="ALIGN ENTIRE LABEL"
         else:
             ordered = order_points(np.asarray(box,dtype=np.float32))
             if alignment_ok:
@@ -474,23 +540,39 @@ class ArtworkPresenceDetector:
         src = np.array([[0,0],[1,0],[1,1],[0,1]],dtype=np.float32)
         H = cv2.getPerspectiveTransform(src, ordered.astype(np.float32))
 
-        for cfg in self.symbols:
-            item = cfg["item"]
-            center = self.expected_centers.get(item)
-            boxn = self.expected_boxes.get(item)
-            contour = self._template_contour_normalized(item)
-            if center is None or contour is None:
-                continue
-            if boxn is None:
-                bx1,by1,bx2,by2 = center[0]-0.06,center[1]-0.04,center[0]+0.06,center[1]+0.04
-            else:
-                bx1,by1,bx2,by2 = boxn
-            pts = contour.copy()
-            pts[:,0] = bx1 + pts[:,0]*(bx2-bx1)
-            pts[:,1] = by1 + pts[:,1]*(by2-by1)
-            proj = cv2.perspectiveTransform(pts.reshape(-1,1,2),H).reshape(-1,2).astype(np.int32)
-            if len(proj) >= 2:
+        # V1.7.5 operator guide: do NOT ask the operator to pixel-match five
+        # small logos. Show only the label boundary plus a few broad anchors.
+        # Fine artwork locations remain a machine-only Golden ROI decision.
+        if self.guide_mode == "outer_anchors" and self.guide_anchors:
+            for anchor in self.guide_anchors:
+                rect = anchor.get("rect") or []
+                if len(rect) != 4:
+                    continue
+                x1,y1,x2,y2 = [float(v) for v in rect]
+                pts=np.array([[x1,y1],[x2,y1],[x2,y2],[x1,y2]],dtype=np.float32)
+                proj=cv2.perspectiveTransform(pts.reshape(-1,1,2),H).reshape(-1,2).astype(np.int32)
                 cv2.polylines(display,[proj],True,color,2,cv2.LINE_AA)
+                label=str(anchor.get("label", "ANCHOR"))
+                px,py=int(proj[0][0]),int(proj[0][1])
+                cv2.putText(display,label,(px,max(18,py-5)),cv2.FONT_HERSHEY_SIMPLEX,0.45,color,1,cv2.LINE_AA)
+        elif self.guide_mode != "outer_only":
+            for cfg in self.symbols:
+                item = cfg["item"]
+                center = self.expected_centers.get(item)
+                boxn = self.expected_boxes.get(item)
+                contour = self._template_contour_normalized(item)
+                if center is None or contour is None:
+                    continue
+                if boxn is None:
+                    bx1,by1,bx2,by2 = center[0]-0.06,center[1]-0.04,center[0]+0.06,center[1]+0.04
+                else:
+                    bx1,by1,bx2,by2 = boxn
+                pts = contour.copy()
+                pts[:,0] = bx1 + pts[:,0]*(bx2-bx1)
+                pts[:,1] = by1 + pts[:,1]*(by2-by1)
+                proj = cv2.perspectiveTransform(pts.reshape(-1,1,2),H).reshape(-1,2).astype(np.int32)
+                if len(proj) >= 2:
+                    cv2.polylines(display,[proj],True,color,2,cv2.LINE_AA)
 
         cv2.rectangle(display,(8,8),(min(w-8,1120),52),(0,0,0),-1)
         cv2.putText(display,header,(18,38),cv2.FONT_HERSHEY_SIMPLEX,0.66,color,2,cv2.LINE_AA)

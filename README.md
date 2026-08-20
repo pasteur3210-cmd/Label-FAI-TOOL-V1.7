@@ -1,4 +1,4 @@
-# Label Auto Inspection Tool V1.7.4
+# Label Auto Inspection Tool V1.7.5
 
 GitHub Build Ready repository.
 
@@ -6,23 +6,19 @@ GitHub Build Ready repository.
 - Chassis Label
 - Inner Box Label
 
-Both profiles support Artwork shape + relative-position verification. Printed Artwork size is intentionally **not** an acceptance criterion.
+Both profiles support Artwork shape + relative-position verification. Printed Artwork size remains **not judged**.
 
-## V1.7.4 main changes
-- Artwork processing runs only when the active Production Zone contains `Artwork:` items. Earlier OCR/Barcode zones stay on the fast path.
-- Registered ROI Artwork inspection: full label registration first, then each symbol is searched only near its Golden expected position.
-- Golden ghost/contour overlay for operator alignment; overlay size is guidance only and is not used for PASS/FAIL.
-- Incomplete/poor label alignment returns `WARN / ALIGN LABEL` and does not accumulate FAIL confirmations.
-- Inner Box COMTREND threshold recalibrated from Golden + field evidence; ROI restriction reduces false-positive risk.
-- Unicode/space-safe PNG loading using `numpy.fromfile + cv2.imdecode`.
-- Each Golden Artwork file is resolved independently; a stale/partial root can no longer hide a valid copy.
-- Manual Previous/Next Zone is held and is not immediately overwritten by auto-scheduler.
-- Retry Zone clears only unfinished candidate/fail state and preserves existing LOCK results.
-- Auto Focus commands are serialized on the Camera capture thread and use OFF -> ON re-trigger.
-- Resource errors are shown/logged as `RESOURCE ERROR`, not endless `SCANNING`.
-- GitHub Actions adds packaged EXE Artwork smoke tests from both normal and Unicode/space paths.
+## V1.7.5 main changes
+- Artwork still runs only in the active Artwork production zone; OCR/Barcode zones remain on the original fast path.
+- Chassis/Inner Box operator guide changed from many small symbol contours to a stable whole-label outline plus 3 broad anchors.
+- The operator guide is static and does not jump with each registration candidate. It is placement guidance only, not a size gauge.
+- Shape and position decisions now use PASS / VERIFY / FAIL dead-bands. Borderline camera jitter is held as VERIFY/WARN and does not accumulate false NG.
+- Registered Golden ROI search is retained. Artwork size remains ignored for PASS/FAIL.
+- Existing V1.7.4 Artwork registration calibration is preserved to avoid disturbing the proven OCR/Barcode pipeline.
+- Unicode/space-safe Golden Artwork loading, resource self-test, manual zone navigation, Retry Zone, and serialized Auto Focus behavior from V1.7.4 are retained.
+- New regression tests include V1.7.4 field-log boundary cases and a fast-path guard proving empty Artwork requests do not run registration.
 
 ## Build
 GitHub Actions workflow: `.github/workflows/build.yml`
 
-Upload the contents of `01_GITHUB_UPLOAD` to the repository root. The engineering documents in `02_ENGINEERING_DOCUMENTS` do not need to be uploaded to GitHub.
+Upload the contents of `01_GITHUB_UPLOAD` to the repository root. `02_ENGINEERING_DOCUMENTS` is for local engineering records and does not need to be uploaded to GitHub.
