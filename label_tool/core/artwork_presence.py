@@ -499,6 +499,55 @@ class ArtworkPresenceDetector:
             log.debug("ARTWORK_EVAL item=%s final=%s %s", item, status, msg)
         return rows, detections
 
+
+    def evaluate_shape_only(self, frame, requested_items=None):
+        """Evaluate artwork *shape only* on a detail/close-up photo.
+
+        V1.7.9 multi-image inspection uses the full-label overview for relative
+        position and optional close-up photos only as higher-resolution shape
+        evidence. Printed size is still ignored. This method deliberately does
+        not run label registration or position acceptance.
+        """
+        requested = None if requested_items is None else set(requested_items)
+        if not self.enabled or frame is None or getattr(frame, "size", 0) == 0:
+            return [], []
+        rows, detections = [], []
+        for cfg in self.symbols:
+            item = cfg["item"]
+            if requested is not None and item not in requested:
+                continue
+            started = time.perf_counter()
+            threshold = float(cfg.get("shape_threshold", cfg.get("presence_threshold", 0.56)))
+            templ = self.templates.get(item)
+            if templ is None:
+                rows.append(FieldResult(name=item, actual="", expected=f"Shape>={threshold:.2f}; close-up",
+                                        status="ERROR", message="Golden artwork template missing",
+                                        error_code="ART-TEMPLATE-MISSING"))
+                continue
+            scales = cfg.get("detect_scales") or self.DEFAULT_SCALES
+            detector = str(cfg.get("detector", "default"))
+            components = None
+            if detector == "comtrend_hybrid" or str(cfg.get("id", "")) == "comtrend_logo":
+                score, best_scale, loc, size, components = self._best_match_comtrend(frame, templ, scales)
+            else:
+                score, best_scale, loc, size = self._best_match(frame, templ, scales)
+            shape_state = self._shape_result(score, threshold, cfg)
+            elapsed = (time.perf_counter()-started)*1000.0
+            status = "PASS" if shape_state == "PASS" else ("WARN" if shape_state == "VERIFY" else "FAIL")
+            actual = "Shape PASS" if status == "PASS" else ("VERIFY" if status == "WARN" else "Shape NG")
+            msg=(f"shape-only close-up score={score:.3f}/{threshold:.2f} state={shape_state}; "
+                 f"scale={best_scale:.2f}(ignored); detector={detector}; components={components or {}}; "
+                 f"relative position must come from full-label overview; {elapsed:.1f}ms")
+            rows.append(FieldResult(name=item, actual=actual, expected=f"Shape>={threshold:.2f}; size ignored",
+                                    status=status, message=msg,
+                                    error_code="" if status=="PASS" else "ART-SHAPE-CLOSEUP"))
+            detections.append(ArtworkDetection(item=item, symbol_id=str(cfg.get("id","")),
+                                                present=status=="PASS", score=score, threshold=threshold,
+                                                best_scale=best_scale, shape_pass=status=="PASS",
+                                                position_pass=False, label_aligned=False, elapsed_ms=elapsed,
+                                                shape_state=shape_state, position_state="NOT_JUDGED"))
+        return rows, detections
+
     def _template_contour_normalized(self, item):
         templ = self.templates.get(item)
         if templ is None:

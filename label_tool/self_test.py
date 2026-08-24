@@ -112,23 +112,44 @@ def run_artwork_self_test(output_path='artwork_self_test.json'):
 
 
 def run_multi_image_self_test(output_path='multi_image_self_test.json'):
-    """Packaged-runtime smoke: multi-image module, fusion model and Excel writer."""
+    """Packaged-runtime smoke for V1.7.9 guided multi-image fusion."""
     from tempfile import TemporaryDirectory
     from .core.multi_image_inspection import MultiImageInspectionEngine, MultiImageResult, ImageEvidence
     out=Path(output_path); out.parent.mkdir(parents=True,exist_ok=True)
-    payload={'test':'EXE_MULTI_IMAGE_SMOKE','passed':False}
+    payload={'test':'EXE_MULTI_IMAGE_SMOKE_V179','passed':False}
     rc=0
     try:
-        profile={'profile_name':'Smoke','label_type':'Test','live':{'required_items':['Artwork: COMTREND Logo']}}
-        eng=MultiImageInspectionEngine(profile,software_version='self-test')
+        profile={
+            'profile_name':'Smoke','label_type':'Chassis Label',
+            'rules':{
+                'sn_regex':r'\d{2}[1-9A-C]4297UF-[A-Z0-9]{2}\d{6}',
+                'sn_display':'YYM4297UF-FFXXXXXX','pn_regex':r'738125-00\d','pn_display':'738125-00X',
+                'made_in_allowed':['China','Taiwan'],'mac_regex':r'[0-9A-F]{12}',
+                'gpon_prefix':'434D5444','gpon_regex':r'434D5444[0-9A-F]{8}',
+                'ssid_prefix':'Telekom Slovenije_','password_length':8,'wifi_key_length':14
+            },
+            'live':{'required_items':['Rule: SSID = MAC Last 6','Rule: GPON S/N = Prefix + MAC Last 8']}
+        }
+        eng=MultiImageInspectionEngine.__new__(MultiImageInspectionEngine); eng.profile=profile; eng.software_version='self-test'
+        r=MultiImageResult(overall='PASS',session_id='smoke',session_dir='',image_count=5,initial_image_count=5,identity_status='PASS')
+        r.session_fields={'mac_barcode':'1C6499AFB49D','ssid':'Telekom Slovenije_AFB49D','gpon_sn_barcode':'434D544499AFB49D'}
+        r.field_sources={
+            'mac_barcode':{'source':'identity.jpg','quality':0.9,'value':'1C6499AFB49D'},
+            'ssid':{'source':'wifi.jpg','quality':0.9,'value':'Telekom Slovenije_AFB49D'},
+            'gpon_sn_barcode':{'source':'identity.jpg','quality':0.9,'value':'434D544499AFB49D'}
+        }
+        best={}; conflicts={}
+        eng._merge_session_rules(r,{},best,conflicts)
+        payload['ssid_mac_fusion']=best.get('Rule: SSID = MAC Last 6').result if best.get('Rule: SSID = MAC Last 6') else 'MISSING'
+        payload['gpon_mac_fusion']=best.get('Rule: GPON S/N = Prefix + MAC Last 8').result if best.get('Rule: GPON S/N = Prefix + MAC Last 8') else 'MISSING'
+        payload['role_identity']=eng.classify_photo_role({'sn_text':'2654297UF-AA000028','mac_text':'1C6499AFB49D'},['1C6499AFB49D'],'',4,5)
+        payload['role_compliance']=eng.classify_photo_role({'made_in':'China','has_laser_text':True},[],'CLASS 1 LASER PRODUCT',5,5)
         with TemporaryDirectory() as td:
-            r=MultiImageResult(overall='PASS',session_id='smoke',session_dir=td,image_count=2,initial_image_count=2,identity_status='PASS')
-            r.evidence['Artwork: COMTREND Logo']=ImageEvidence('Artwork: COMTREND Logo','PASS','Shape+Position PASS','Expected','img2.jpg',0.9,'smoke','')
+            r.session_dir=td; r.evidence=best; r.photo_roles={'full.jpg':'FULL','identity.jpg':'IDENTITY','wifi.jpg':'WIFI'}
             report=eng._write_excel(r,{})
             payload['report_created']=Path(report).exists()
-            payload['module']='label_tool.core.multi_image_inspection'
-            payload['passed']=bool(payload['report_created'])
-            if not payload['passed']: rc=3
+        payload['passed']=bool(payload['report_created'] and payload['ssid_mac_fusion']=='PASS' and payload['gpon_mac_fusion']=='PASS' and payload['role_identity']=='IDENTITY' and payload['role_compliance']=='COMPLIANCE')
+        if not payload['passed']: rc=3
     except Exception as exc:
         payload['error']=repr(exc); rc=2
     payload['completed_at']=time.strftime('%Y-%m-%dT%H:%M:%S')

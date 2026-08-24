@@ -15,7 +15,12 @@ import xlsxwriter
 
 from .engine import InspectionEngine
 from .artwork_presence import ArtworkPresenceDetector
-from .models import FieldResult
+from .models import FieldResult, InspectionResult
+from .decoder import decode_codes_multi
+from .parser import merge_fields
+from .rules import validate
+from .preprocess import normalize_for_ocr
+from .image_quality import evaluate_image_quality
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +29,61 @@ IDENTITY_ITEMS = {
     "Variable: MAC Barcode Format": "mac",
     "Variable: GPON S/N Barcode Format": "gpon_sn",
 }
+
+ROLE_ORDER = ["FULL", "BASIC", "WIFI", "IDENTITY", "COMPLIANCE"]
+ROLE_LABELS = {
+    "FULL": "Full Label",
+    "BASIC": "Basic / Logo",
+    "WIFI": "WiFi / User Data",
+    "IDENTITY": "Identity / Barcode",
+    "COMPLIANCE": "Compliance / Artwork",
+    "DETAIL": "Detail / Supplemental",
+}
+
+ROLE_ITEMS_CHASSIS = {
+    "BASIC": {
+        "Fixed: model", "Fixed: ip", "Fixed: username", "Fixed: GPON VoIP Gateway",
+        "Fixed: Input 12V 1.5A", "Fixed: USB 2.0 5V 500mA", "Variable: P/N Format",
+        "Artwork: COMTREND Logo",
+    },
+    "WIFI": {
+        "Variable: Password Format", "Variable: WiFi Key Format", "Variable: SSID Format",
+        "Variable: WiFi QR Format", "Consistency: QR SSID vs Printed SSID",
+        "Consistency: QR Key vs Printed WiFi Key", "Fixed: Comtrend Central Europe address",
+    },
+    "IDENTITY": {
+        "Variable: S/N Human Readable Format", "Variable: S/N Barcode Format",
+        "Consistency: S/N Text vs Barcode", "Variable: MAC Human Readable Format",
+        "Variable: MAC Barcode Format", "Consistency: MAC Text vs Barcode",
+        "Variable: GPON S/N Human Readable Format", "Variable: GPON S/N Barcode Format",
+        "Consistency: GPON S/N Text vs Barcode", "Rule: GPON S/N = Prefix + MAC Last 8",
+        "Rule: SSID = MAC Last 6",
+    },
+    "COMPLIANCE": {
+        "Variable: Made in Format", "Fixed: CLASS 1 LASER PRODUCT",
+        "Artwork: Recycling Mark", "Artwork: RoHS Mark", "Artwork: CE Mark", "Artwork: WEEE Mark",
+    },
+}
+
+ROLE_ITEMS_INNER = {
+    "BASIC": {"Fixed: GPON VoIP Gateway", "Fixed: model", "Variable: P/N Format", "Artwork: COMTREND Logo"},
+    "WIFI": {"Fixed: DoC Link"},
+    "IDENTITY": {
+        "Variable: S/N Human Readable Format", "Variable: S/N Barcode Format", "Consistency: S/N Text vs Barcode",
+        "Variable: MAC Human Readable Format", "Variable: MAC Barcode Format", "Consistency: MAC Text vs Barcode",
+        "Variable: GPON S/N Human Readable Format", "Variable: GPON S/N Barcode Format",
+        "Consistency: GPON S/N Text vs Barcode", "Rule: GPON S/N = Prefix + MAC Last 8",
+    },
+    "COMPLIANCE": {"Variable: Made in Format", "Artwork: Recycling Mark", "Artwork: CE Mark", "Artwork: WEEE Mark"},
+}
+
+RAW_FIELD_KEYS = [
+    "model", "ip", "username", "pn", "made_in", "password", "wifi_key", "ssid",
+    "sn_text", "sn_barcode", "mac_text", "mac_barcode", "gpon_sn_text", "gpon_sn_barcode",
+    "wifi_qr", "qr_ssid", "qr_wifi_key", "has_gateway_text", "has_input_text", "has_usb_text",
+    "has_comtrend_address", "has_laser_text",
+]
+
 
 @dataclass
 class ImageEvidence:
@@ -35,6 +95,8 @@ class ImageEvidence:
     quality_score: float = 0.0
     message: str = ""
     error_code: str = ""
+    photo_role: str = "DETAIL"
+
 
 @dataclass
 class MultiImageResult:
@@ -50,14 +112,27 @@ class MultiImageResult:
     conflicts: dict[str, list[ImageEvidence]] = field(default_factory=dict)
     unresolved_items: list[str] = field(default_factory=list)
     report_path: str = ""
+    session_fields: dict = field(default_factory=dict)
+    field_sources: dict = field(default_factory=dict)
+    photo_roles: dict = field(default_factory=dict)
+    position_evidence: dict = field(default_factory=dict)
+    closeup_shape_evidence: dict = field(default_factory=dict)
+
 
 class MultiImageInspectionEngine:
-    """Batch multi-photo inspection with per-item evidence fusion.
+    """V1.7.9 guided multi-photo inspection.
 
-    A single inspection session may contain multiple photos of the same label.
-    Each item keeps its best usable evidence. Blurry/unreadable observations are
-    NEED_MORE_IMAGE rather than hard NG. Conflicting high-quality evidence is
-    surfaced as CONFLICT and is never silently overwritten.
+    Recommended capture set:
+      1) Full Label overview
+      2) Basic / Logo close-up
+      3) WiFi / User data close-up
+      4) Identity / Barcode close-up
+      5) Compliance / Artwork close-up
+
+    The engine does not force a geometric 4-way split. It classifies each photo
+    by its readable content and combines raw facts across photos before running
+    relationship rules. This lets a clear close-up rescue a weak area without
+    requiring every photo to be a complete-label image.
     """
 
     def __init__(self, profile: dict, software_version: str = ""):
@@ -79,10 +154,29 @@ class MultiImageInspectionEngine:
             return None
 
     @staticmethod
+    def _sharpness(image) -> float:
+        if image is None or not getattr(image, "size", 0):
+            return 0.0
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    @staticmethod
+    def _contrast(image) -> float:
+        if image is None or not getattr(image, "size", 0):
+            return 0.0
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        return float(np.std(gray))
+
+    @classmethod
+    def _direct_quality_score(cls, image) -> float:
+        sh = cls._sharpness(image)
+        ct = cls._contrast(image)
+        return float(min(1.0, sh / 300.0) * 0.75 + min(1.0, ct / 80.0) * 0.25)
+
+    @staticmethod
     def _quality_score(q) -> float:
         if q is None:
             return 0.0
-        # Bounded ranking score. Sharpness dominates while contrast contributes.
         return float(min(1.0, max(0.0, q.sharpness / 300.0)) * 0.75 + min(1.0, max(0.0, q.contrast / 80.0)) * 0.25)
 
     @staticmethod
@@ -90,49 +184,74 @@ class MultiImageInspectionEngine:
         status = (row.status or "").upper()
         if status == "PASS":
             return "PASS"
-        if status in ("WARN", "INFO", "SKIP", "ERROR"):
-            return "NEED_MORE_IMAGE" if status != "ERROR" else "ERROR"
+        if status in ("WARN", "INFO", "SKIP"):
+            return "NEED_MORE_IMAGE"
+        if status == "ERROR":
+            return "ERROR"
         if status == "FAIL":
-            # Empty/undetected values on a weak photo are not reliable NG evidence.
             if not quality_ok or not (row.actual or "").strip():
                 return "NEED_MORE_IMAGE"
             return "FAIL"
         return "NEED_MORE_IMAGE"
 
-    def _inspect_one(self, image_path: str, session_dir: Path, expected: dict, index: int, target_items=None):
-        per_root = session_dir / "per_image"
-        per_root.mkdir(parents=True, exist_ok=True)
-        one = self.base.inspect(image_path, str(per_root), expected)
-        image = self._safe_load(image_path)
-        art_rows = []
-        if image is not None:
-            art_requested=None if target_items is None else [x for x in target_items if str(x).startswith("Artwork: ")]
-            art_rows, _ = self.artwork.evaluate(image, requested_items=art_requested)
-        rows = list(one.fields)
-        existing = {r.name for r in rows}
-        for r in art_rows:
-            if r.name not in existing:
-                rows.append(r)
-            else:
-                # Artwork engine is authoritative for artwork items.
-                rows = [r if x.name == r.name else x for x in rows]
-        qscore = self._quality_score(one.quality)
-        quality_ok = bool(one.quality and one.quality.passed)
-        obs = []
-        for row in rows:
-            if target_items is not None and row.name not in target_items:
-                continue
-            obs.append(ImageEvidence(
-                item=row.name,
-                result=self._classify_field(row, quality_ok),
-                actual=row.actual,
-                expected=row.expected,
-                source_image=Path(image_path).name,
-                quality_score=qscore,
-                message=row.message,
-                error_code=row.error_code,
-            ))
-        return one, obs
+    def _role_items(self):
+        label_type = str(self.profile.get("label_type", self.profile.get("profile_name", ""))).lower()
+        return ROLE_ITEMS_INNER if "inner" in label_type else ROLE_ITEMS_CHASSIS
+
+    @staticmethod
+    def _count_hits(fields: dict, keys: list[str]) -> int:
+        return sum(1 for k in keys if fields.get(k) not in (None, "", False))
+
+    def classify_photo_role(self, fields: dict, decoded_texts: list[str], raw_text: str, index: int, total: int) -> str:
+        """Content-based role classification with five-photo order as fallback."""
+        txt = (raw_text or "").lower()
+        if total >= 5 and index == 1:
+            return "FULL"
+        scores = {
+            "BASIC": self._count_hits(fields, ["model", "pn", "ip", "username", "has_gateway_text", "has_input_text", "has_usb_text"]),
+            "WIFI": self._count_hits(fields, ["password", "wifi_key", "ssid", "wifi_qr", "has_comtrend_address"]),
+            "IDENTITY": self._count_hits(fields, ["sn_text", "sn_barcode", "mac_text", "mac_barcode", "gpon_sn_text", "gpon_sn_barcode"]),
+            "COMPLIANCE": self._count_hits(fields, ["made_in", "has_laser_text"]),
+        }
+        if "class 1 laser" in txt or "made in" in txt or "rohs" in txt:
+            scores["COMPLIANCE"] += 2
+        if any((x or "").upper().startswith("WIFI:") for x in decoded_texts):
+            scores["WIFI"] += 2
+        if len(decoded_texts) >= 2:
+            scores["IDENTITY"] += 2
+        active = sum(1 for v in scores.values() if v >= 2)
+        total_hits = sum(scores.values())
+        if active >= 3 or total_hits >= 9:
+            return "FULL"
+        best_role, best_score = max(scores.items(), key=lambda kv: kv[1])
+        if best_score > 0:
+            return best_role
+        # Standard five-photo fallback if OCR cannot classify a blurry image.
+        if total >= 5 and 1 <= index <= 5:
+            return ROLE_ORDER[index-1]
+        return "DETAIL"
+
+    def _decode_original(self, image):
+        try:
+            decoded = decode_codes_multi(image, {}, include_full=True)
+            return decoded, [x.text for x in decoded]
+        except Exception as exc:
+            log.warning("MULTI_IMAGE_FULL_DECODE_ERROR %s", exc)
+            return [], []
+
+    def _ocr_original(self, image):
+        try:
+            txt, _ = self.base.ocr.read(normalize_for_ocr(image))
+            return txt or ""
+        except Exception as exc:
+            log.warning("MULTI_IMAGE_ORIGINAL_OCR_ERROR %s", exc)
+            return ""
+
+    def _direct_original_facts(self, image):
+        decoded, decoded_texts = self._decode_original(image)
+        raw_text = self._ocr_original(image)
+        fields = merge_fields(raw_text, decoded_texts, roi_texts={})
+        return fields, raw_text, decoded_texts, decoded
 
     @staticmethod
     def _better(new: ImageEvidence, old: ImageEvidence | None) -> bool:
@@ -153,6 +272,174 @@ class MultiImageInspectionEngine:
                 if item not in items:
                     items.append(item)
         return items
+
+    def _role_allows(self, role: str, item: str) -> bool:
+        if role in ("FULL", "DETAIL"):
+            return True
+        return item in self._role_items().get(role, set())
+
+    def _inspect_one(self, image_path: str, session_dir: Path, expected: dict, index: int, target_items=None):
+        per_root = session_dir / "per_image"
+        per_root.mkdir(parents=True, exist_ok=True)
+        image = self._safe_load(image_path)
+        if image is None:
+            one=InspectionResult(overall="IMAGE_NG",error_codes=["IMG-001"])
+            return one, [], {}, "DETAIL", {}, {}, {}
+
+        # V1.7.9 starts from the ORIGINAL photo. This is the critical difference
+        # from the legacy offline path: a close-up photo is useful evidence even
+        # when it cannot be reconstructed into a whole-label perspective view.
+        direct_fields, raw_text, decoded_texts, _decoded = self._direct_original_facts(image)
+        total = int(getattr(self, "_batch_total", index) or index)
+        role = self.classify_photo_role(direct_fields, decoded_texts, raw_text, index, total)
+        qscore = self._direct_quality_score(image)
+        direct_quality_ok = self._sharpness(image) >= 18.0 and self._contrast(image) >= 8.0
+        direct_rows = validate(direct_fields, self.profile, expected_work_order=expected or {})
+
+        if role == "FULL":
+            # The overview still uses the established whole-label engine because
+            # it supplies layout/position evidence and legacy ROI evidence.
+            one = self.base.inspect(image_path, str(per_root), expected)
+            rows_by_name = {r.name: r for r in one.fields}
+        else:
+            # Detail photos deliberately skip detect_label/perspective/legacy ROI
+            # processing. This avoids the V1.7.8 failure mode where a clear
+            # Identity/Compliance close-up was rotated/cropped as if it were a
+            # complete label.
+            one = InspectionResult(
+                overall="DETAIL",
+                quality=evaluate_image_quality(image, self.profile),
+                fields=list(direct_rows),
+                decoded=[], ocr_text=raw_text, error_codes=[]
+            )
+            rows_by_name = {}
+
+        # Original-photo OCR/decoder evidence is allowed to rescue a weak legacy
+        # full-label correction and is the primary evidence for detail roles.
+        for r in direct_rows:
+            if self._role_allows(role, r.name):
+                old = rows_by_name.get(r.name)
+                if old is None or r.status == "PASS" or old.status != "PASS":
+                    rows_by_name[r.name] = r
+
+        # Artwork: full overview supplies relative position. Basic/Compliance
+        # close-ups may supply higher-resolution shape evidence. Size is ignored.
+        art_position = {}
+        art_shape = {}
+        art_requested = None if target_items is None else [x for x in target_items if str(x).startswith("Artwork: ")]
+        if role == "FULL":
+            art_rows, art_dets = self.artwork.evaluate(image, requested_items=art_requested)
+            for r in art_rows:
+                rows_by_name[r.name] = r
+            for d in art_dets:
+                art_position[d.item] = {
+                    "position_state": d.position_state,
+                    "position_error": d.position_error,
+                    "shape_state": d.shape_state,
+                    "score": d.score,
+                    "source": Path(image_path).name,
+                    "quality": qscore,
+                }
+        elif role in ("BASIC", "COMPLIANCE", "DETAIL"):
+            allowed = self._role_items().get(role, set()) if role != "DETAIL" else set(self._required_items())
+            req = [x for x in (art_requested if art_requested is not None else allowed) if str(x).startswith("Artwork: ")]
+            if req:
+                _shape_rows, shape_dets = self.artwork.evaluate_shape_only(image, requested_items=req)
+                for d in shape_dets:
+                    art_shape[d.item] = {
+                        "shape_state": d.shape_state,
+                        "score": d.score,
+                        "source": Path(image_path).name,
+                        "quality": qscore,
+                        "threshold": d.threshold,
+                    }
+
+        observations = []
+        for row in rows_by_name.values():
+            if target_items is not None and row.name not in target_items:
+                continue
+            if not self._role_allows(role, row.name) and role != "FULL":
+                continue
+            observations.append(ImageEvidence(
+                item=row.name,
+                result=self._classify_field(row, direct_quality_ok),
+                actual=row.actual,
+                expected=row.expected,
+                source_image=Path(image_path).name,
+                quality_score=qscore,
+                message=f"role={ROLE_LABELS.get(role, role)} | {row.message}",
+                error_code=row.error_code,
+                photo_role=role,
+            ))
+
+        return one, observations, direct_fields, role, art_position, art_shape, {
+            "raw_text": raw_text,
+            "decoded_texts": decoded_texts,
+            "sharpness": self._sharpness(image),
+            "contrast": self._contrast(image),
+            "quality": qscore,
+        }
+
+    @staticmethod
+    def _merge_fact(result: MultiImageResult, key: str, value, source: str, quality: float):
+        if value in (None, "", False):
+            return
+        current = result.field_sources.get(key)
+        if current is None or quality > float(current.get("quality", 0.0)):
+            result.session_fields[key] = value
+            result.field_sources[key] = {"source": source, "quality": float(quality), "value": value}
+
+    def _merge_session_rules(self, result: MultiImageResult, expected: dict, best: dict, conflicts: dict):
+        # Minimal synthetic/custom profiles used by plugins/tests may not carry
+        # the production rule schema. In that case preserve legacy fusion only.
+        if not self.profile.get("rules") or "sn_regex" not in self.profile.get("rules", {}):
+            return
+        fields = dict(result.session_fields)
+        fields["sn"] = fields.get("sn_barcode") or fields.get("sn_text", "")
+        fields["mac"] = fields.get("mac_barcode") or fields.get("mac_text", "")
+        fields["gpon_sn"] = fields.get("gpon_sn_barcode") or fields.get("gpon_sn_text", "")
+        rows = validate(fields, self.profile, expected_work_order=expected or {})
+        for row in rows:
+            if row.name not in self._required_items():
+                continue
+            # Session-level rules can combine facts from different photos.
+            if row.status == "PASS":
+                src_keys = []
+                for k, info in result.field_sources.items():
+                    if str(info.get("value", "")) and str(info.get("value", "")) in str(row.actual) + str(row.expected):
+                        src_keys.append(info.get("source", ""))
+                src = "+".join(sorted(set(x for x in src_keys if x))) or "SESSION_FUSION"
+                ev = ImageEvidence(row.name, "PASS", row.actual, row.expected, src, 0.95,
+                                   "Session-level raw fact fusion / rule re-evaluation", row.error_code, "SESSION")
+                old = best.get(row.name)
+                if self._better(ev, old):
+                    best[row.name] = ev
+            elif row.status == "FAIL" and row.actual:
+                ev = ImageEvidence(row.name, "FAIL", row.actual, row.expected, "SESSION_FUSION", 0.85,
+                                   row.message or "Session-level rule failure", row.error_code, "SESSION")
+                old = best.get(row.name)
+                if old and old.result == "PASS":
+                    conflicts.setdefault(row.name, [old]).append(ev)
+                elif self._better(ev, old):
+                    best[row.name] = ev
+
+    def _merge_artwork_components(self, result: MultiImageResult, best: dict):
+        for item in [x for x in self._required_items() if x.startswith("Artwork: ")]:
+            p = result.position_evidence.get(item)
+            s = result.closeup_shape_evidence.get(item)
+            if not p or not s:
+                continue
+            if p.get("position_state") == "PASS" and s.get("shape_state") == "PASS":
+                q = min(1.0, (float(p.get("quality",0.0)) + float(s.get("quality",0.0))) / 2.0 + 0.15)
+                ev = ImageEvidence(
+                    item=item, result="PASS", actual="Shape+Position PASS", expected="Shape + relative position; size ignored",
+                    source_image=f"{p.get('source','')} + {s.get('source','')}", quality_score=q,
+                    message=(f"Multi-photo artwork fusion: overview position PASS err={p.get('position_error',999):.2f}; "
+                             f"close-up shape PASS score={s.get('score',0):.3f}; size ignored"),
+                    photo_role="SESSION",
+                )
+                if self._better(ev, best.get(item)):
+                    best[item] = ev
 
     def inspect_batch(self, image_paths: list[str], output_root="image_records", expected=None,
                       previous_session: MultiImageResult | None = None, progress_callback=None,
@@ -176,54 +463,87 @@ class MultiImageInspectionEngine:
 
         result = previous_session or MultiImageResult(session_id=sid, session_dir=str(session_dir))
         targets = None if target_items is None else set(target_items)
+
         def progress(stage, index=0, total=0, image="", elapsed_ms=None, **extra):
             if progress_callback:
-                try: progress_callback({"stage":stage,"index":index,"total":total,"image":image,"elapsed_ms":elapsed_ms,**extra})
-                except Exception: pass
+                try:
+                    progress_callback({"stage": stage, "index": index, "total": total, "image": image,
+                                       "elapsed_ms": elapsed_ms, **extra})
+                except Exception:
+                    pass
+
         def cancelled():
-            return bool(cancel_event is not None and getattr(cancel_event,"is_set",lambda:False)())
+            return bool(cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)())
+
         if not previous_session:
             result.initial_image_count = len(image_paths)
         else:
             result.additional_image_count += len(image_paths)
         write(execution_log, f"IMAGE_INSPECTION_START profile={self.profile.get('profile_name','')} add_count={len(image_paths)} targets={sorted(targets) if targets is not None else 'ALL'}")
-        progress("batch_start",0,len(image_paths),"")
+        write(execution_log, "CAPTURE_PLAN recommended=FULL+BASIC+WIFI+IDENTITY+COMPLIANCE auto_classification=ON")
+        progress("batch_start", 0, len(image_paths), "")
 
-        # Gather existing evidence/conflicts for incremental add-images flow.
         best = dict(result.evidence)
-        conflicts = {k:list(v) for k,v in result.conflicts.items()}
-        identity_sets = {k:set([v]) if v else set() for k,v in result.identity_values.items()}
+        conflicts = {k: list(v) for k, v in result.conflicts.items()}
+        identity_sets = {k: set([v]) if v else set() for k, v in result.identity_values.items()}
 
         for idx, src in enumerate(image_paths, 1):
             if cancelled():
                 write(execution_log, f"IMAGE_INSPECTION_CANCELLED before_index={idx}")
-                progress("cancelled",idx-1,len(image_paths),"")
+                progress("cancelled", idx-1, len(image_paths), "")
                 raise RuntimeError("Image inspection cancelled by user")
-            image_started=time.perf_counter()
+            image_started = time.perf_counter()
             src_path = Path(src)
-            progress("processing",idx,len(image_paths),src_path.name)
-            copy_started=time.perf_counter()
+            progress("processing", idx, len(image_paths), src_path.name)
+            copy_started = time.perf_counter()
             dest = src_dir / f"{result.image_count + idx:02d}_{src_path.name}"
             if not dest.exists():
                 shutil.copy2(src_path, dest)
-            copy_ms=(time.perf_counter()-copy_started)*1000.0
-            inspect_started=time.perf_counter()
-            if targets is None:
-                one, observations = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx)
+            copy_ms = (time.perf_counter()-copy_started)*1000.0
+            inspect_started = time.perf_counter()
+            self._batch_total = result.image_count + len(image_paths)
+            try:
+                one_result = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx, target_items=targets)
+            except TypeError as exc:
+                # Compatibility with earlier custom/test engines that override
+                # _inspect_one using the V1.7.7 four-argument contract.
+                if "target_items" not in str(exc):
+                    raise
+                one_result = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx)
+            # Backward-compatible test/plugin contract: V1.7.7/1.7.8 custom
+            # engines returned only (InspectionResult, observations).
+            if len(one_result) == 2:
+                one, observations = one_result
+                raw_fields, role, art_pos, art_shape = {}, "DETAIL", {}, {}
+                q=getattr(one,"quality",None)
+                diag={"raw_text":"","decoded_texts":[],"sharpness":getattr(q,"sharpness",0.0),
+                      "contrast":getattr(q,"contrast",0.0),"quality":self._quality_score(q)}
             else:
-                one, observations = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx, target_items=targets)
-            inspect_ms=(time.perf_counter()-inspect_started)*1000.0
-            q = one.quality
-            total_ms=(time.perf_counter()-image_started)*1000.0
-            write(performance_log, f"IMAGE index={idx}/{len(image_paths)} file={src_path.name} copy_ms={copy_ms:.1f} inspect_ms={inspect_ms:.1f} total_ms={total_ms:.1f} target_count={len(targets) if targets is not None else 'ALL'}")
-            write(debug_log, f"IMAGE file={src_path.name} overall={one.overall} quality_pass={bool(q and q.passed)} sharpness={getattr(q,'sharpness',0):.1f} errors={one.error_codes}")
+                one, observations, raw_fields, role, art_pos, art_shape, diag = one_result
+            inspect_ms = (time.perf_counter()-inspect_started)*1000.0
+            total_ms = (time.perf_counter()-image_started)*1000.0
+            result.photo_roles[src_path.name] = role
+            write(performance_log, f"IMAGE index={idx}/{len(image_paths)} role={role} file={src_path.name} copy_ms={copy_ms:.1f} inspect_ms={inspect_ms:.1f} total_ms={total_ms:.1f} target_count={len(targets) if targets is not None else 'ALL'}")
+            write(debug_log, f"IMAGE file={src_path.name} role={role} base_overall={one.overall} direct_sharpness={diag.get('sharpness',0):.1f} direct_contrast={diag.get('contrast',0):.1f} direct_q={diag.get('quality',0):.3f} decoded={diag.get('decoded_texts',[])}")
+
+            for key, value in raw_fields.items():
+                if key in RAW_FIELD_KEYS:
+                    self._merge_fact(result, key, value, src_path.name, float(diag.get("quality",0.0)))
+
+            for item, info in art_pos.items():
+                old = result.position_evidence.get(item)
+                if old is None or float(info.get("quality",0)) > float(old.get("quality",0)):
+                    result.position_evidence[item] = info
+            for item, info in art_shape.items():
+                old = result.closeup_shape_evidence.get(item)
+                if old is None or float(info.get("score",0)) > float(old.get("score",0)):
+                    result.closeup_shape_evidence[item] = info
 
             for ev in observations:
-                write(debug_log, f"EVIDENCE item={ev.item} result={ev.result} q={ev.quality_score:.3f} source={ev.source_image} actual={ev.actual!r} code={ev.error_code} msg={ev.message}")
+                write(debug_log, f"EVIDENCE item={ev.item} result={ev.result} role={ev.photo_role} q={ev.quality_score:.3f} source={ev.source_image} actual={ev.actual!r} code={ev.error_code} msg={ev.message}")
                 if ev.item in IDENTITY_ITEMS and ev.result == "PASS" and ev.actual:
                     identity_sets.setdefault(IDENTITY_ITEMS[ev.item], set()).add(ev.actual.strip().upper())
                 old = best.get(ev.item)
-                # High-quality contradictory PASS/FAIL => explicit conflict.
                 if old and {old.result, ev.result} == {"PASS", "FAIL"} and min(old.quality_score, ev.quality_score) >= 0.45:
                     bucket = conflicts.setdefault(ev.item, [])
                     if not bucket:
@@ -232,18 +552,24 @@ class MultiImageInspectionEngine:
                     continue
                 if self._better(ev, old):
                     best[ev.item] = ev
-            progress("image_done",idx,len(image_paths),src_path.name,elapsed_ms=total_ms)
+            progress("image_done", idx, len(image_paths), f"{src_path.name} [{ROLE_LABELS.get(role,role)}]", elapsed_ms=total_ms)
 
         result.image_count += len(image_paths)
+
+        # Cross-photo fusion: rerun all data/relationship rules from the best raw
+        # facts gathered across the photo set, then combine close-up artwork shape
+        # with full-overview relative-position evidence.
+        self._merge_session_rules(result, expected, best, conflicts)
+        self._merge_artwork_components(result, best)
+
         result.evidence = best
         result.conflicts = conflicts
-        result.identity_values = {k:(sorted(v)[0] if len(v)==1 else " | ".join(sorted(v))) for k,v in identity_sets.items() if v}
-        mismatch = {k:v for k,v in identity_sets.items() if len(v)>1}
+        result.identity_values = {k: (sorted(v)[0] if len(v) == 1 else " | ".join(sorted(v))) for k, v in identity_sets.items() if v}
+        mismatch = {k: v for k, v in identity_sets.items() if len(v) > 1}
         result.identity_status = "MISMATCH" if mismatch else ("PASS" if any(identity_sets.values()) else "UNKNOWN")
 
         required = self._required_items()
-        unresolved = []
-        hard_fail = []
+        unresolved, hard_fail = [], []
         for item in required:
             if item in conflicts:
                 continue
@@ -265,16 +591,16 @@ class MultiImageInspectionEngine:
         else:
             result.overall = "PASS"
 
-        write(test_log, f"RESULT overall={result.overall} images={result.image_count} identity={result.identity_status} unresolved={unresolved} conflicts={list(conflicts)} hard_fail={hard_fail}")
-        write(execution_log, f"IMAGE_INSPECTION_END overall={result.overall} total_images={result.image_count}")
+        write(test_log, f"RESULT overall={result.overall} images={result.image_count} identity={result.identity_status} roles={result.photo_roles} unresolved={unresolved} conflicts={list(conflicts)} hard_fail={hard_fail}")
+        write(execution_log, f"IMAGE_INSPECTION_END overall={result.overall} total_images={result.image_count} roles={result.photo_roles}")
 
-        report_started=time.perf_counter()
-        progress("report",len(image_paths),len(image_paths),"")
+        report_started = time.perf_counter()
+        progress("report", len(image_paths), len(image_paths), "")
         result.report_path = self._write_excel(result, expected)
         (session_dir / "result.json").write_text(json.dumps(self._serialize(result), ensure_ascii=False, indent=2), encoding="utf-8")
-        report_ms=(time.perf_counter()-report_started)*1000.0
-        write(performance_log,f"REPORT excel_json_ms={report_ms:.1f} overall={result.overall}")
-        progress("completed",len(image_paths),len(image_paths),"",elapsed_ms=report_ms)
+        report_ms = (time.perf_counter()-report_started)*1000.0
+        write(performance_log, f"REPORT excel_json_ms={report_ms:.1f} overall={result.overall}")
+        progress("completed", len(image_paths), len(image_paths), "", elapsed_ms=report_ms)
         return result
 
     def _serialize(self, result: MultiImageResult):
@@ -287,56 +613,69 @@ class MultiImageInspectionEngine:
             "identity_status": result.identity_status,
             "identity_values": result.identity_values,
             "unresolved_items": result.unresolved_items,
-            "evidence": {k:asdict(v) for k,v in result.evidence.items()},
-            "conflicts": {k:[asdict(x) for x in v] for k,v in result.conflicts.items()},
+            "photo_roles": result.photo_roles,
+            "session_fields": result.session_fields,
+            "field_sources": result.field_sources,
+            "position_evidence": result.position_evidence,
+            "closeup_shape_evidence": result.closeup_shape_evidence,
+            "evidence": {k: asdict(v) for k, v in result.evidence.items()},
+            "conflicts": {k: [asdict(x) for x in v] for k, v in result.conflicts.items()},
             "report_path": result.report_path,
         }
 
     def _write_excel(self, result: MultiImageResult, expected: dict):
         p = Path(result.session_dir) / f"Label_Image_Inspection_Report_{result.session_id}.xlsx"
-        wb=xlsxwriter.Workbook(str(p))
-        h=wb.add_format({"bold":True,"bg_color":"#4472C4","font_color":"#FFFFFF","border":1})
-        c=wb.add_format({"border":1,"text_wrap":True,"valign":"top"})
-        good=wb.add_format({"border":1,"bg_color":"#E2F0D9","font_color":"#006100","bold":True})
-        bad=wb.add_format({"border":1,"bg_color":"#FCE4D6","font_color":"#9C0006","bold":True})
-        warn=wb.add_format({"border":1,"bg_color":"#FFF2CC","font_color":"#7F6000","bold":True})
-        ws=wb.add_worksheet("Summary")
-        rows=[
-            ("Overall",result.overall),("Inspection Mode","MULTI_IMAGE"),("Profile",self.profile.get("profile_name","")),
-            ("Label Type",self.profile.get("label_type","")),("Software Version",self.software_version),
-            ("Session ID",result.session_id),("Images Loaded",result.image_count),("Initial Batch",result.initial_image_count),
-            ("Additional Images",result.additional_image_count),("Identity Check",result.identity_status),
-            ("S/N",result.identity_values.get("sn","")),("MAC",result.identity_values.get("mac","")),
-            ("GPON S/N",result.identity_values.get("gpon_sn","")),("Work Order P/N",expected.get("pn","")),
-            ("Made in",expected.get("made_in","")),("Need More Image",", ".join(result.unresolved_items)),
-            ("Conflicts",", ".join(result.conflicts.keys())),
+        wb = xlsxwriter.Workbook(str(p))
+        h = wb.add_format({"bold": True, "bg_color": "#4472C4", "font_color": "#FFFFFF", "border": 1})
+        c = wb.add_format({"border": 1, "text_wrap": True, "valign": "top"})
+        good = wb.add_format({"border": 1, "bg_color": "#E2F0D9", "font_color": "#006100", "bold": True})
+        bad = wb.add_format({"border": 1, "bg_color": "#FCE4D6", "font_color": "#9C0006", "bold": True})
+        warn = wb.add_format({"border": 1, "bg_color": "#FFF2CC", "font_color": "#7F6000", "bold": True})
+        ws = wb.add_worksheet("Summary")
+        rows = [
+            ("Overall", result.overall), ("Inspection Mode", "GUIDED_MULTI_IMAGE"),
+            ("Recommended Capture", "Full Label + Basic + WiFi + Identity + Compliance"),
+            ("Profile", self.profile.get("profile_name", "")), ("Label Type", self.profile.get("label_type", "")),
+            ("Software Version", self.software_version), ("Session ID", result.session_id),
+            ("Images Loaded", result.image_count), ("Initial Batch", result.initial_image_count),
+            ("Additional Images", result.additional_image_count), ("Identity Check", result.identity_status),
+            ("S/N", result.identity_values.get("sn", "")), ("MAC", result.identity_values.get("mac", "")),
+            ("GPON S/N", result.identity_values.get("gpon_sn", "")), ("Work Order P/N", expected.get("pn", "")),
+            ("Made in", expected.get("made_in", "")), ("Need More Image", ", ".join(result.unresolved_items)),
+            ("Conflicts", ", ".join(result.conflicts.keys())),
         ]
-        ws.set_column(0,0,24); ws.set_column(1,1,80)
-        for r,(k,v) in enumerate(rows):
-            ws.write(r,0,k,h)
-            fmt=good if k=="Overall" and result.overall=="PASS" else bad if k=="Overall" and result.overall in ("FAIL","IDENTITY_MISMATCH","CONFLICT") else warn if k=="Overall" else c
-            ws.write(r,1,str(v),fmt)
-        out=wb.add_worksheet("Inspection_Result")
-        heads=["Item","Result","Actual","Expected","Evidence Image","Quality Score","Message","Error Code"]
-        for col,name in enumerate(heads): out.write(0,col,name,h)
-        out.set_column(0,0,42); out.set_column(1,1,18); out.set_column(2,3,30); out.set_column(4,4,36); out.set_column(5,5,14); out.set_column(6,7,55)
-        all_items=self._required_items()
-        for r,item in enumerate(all_items,1):
-            ev=result.evidence.get(item)
+        ws.set_column(0, 0, 24); ws.set_column(1, 1, 100)
+        for r, (k, v) in enumerate(rows):
+            ws.write(r, 0, k, h)
+            fmt = good if k == "Overall" and result.overall == "PASS" else bad if k == "Overall" and result.overall in ("FAIL", "IDENTITY_MISMATCH", "CONFLICT") else warn if k == "Overall" else c
+            ws.write(r, 1, str(v), fmt)
+
+        out = wb.add_worksheet("Inspection_Result")
+        heads = ["Item", "Result", "Actual", "Expected", "Evidence Image", "Photo Role", "Quality Score", "Message", "Error Code"]
+        for col, name in enumerate(heads): out.write(0, col, name, h)
+        out.set_column(0, 0, 42); out.set_column(1, 1, 18); out.set_column(2, 3, 30); out.set_column(4, 5, 36); out.set_column(6, 6, 14); out.set_column(7, 8, 58)
+        for r, item in enumerate(self._required_items(), 1):
+            ev = result.evidence.get(item)
             if item in result.conflicts:
-                vals=[item,"CONFLICT","","","Multiple images","", "Conflicting high-quality evidence",""]
+                vals = [item, "CONFLICT", "", "", "Multiple images", "SESSION", "", "Conflicting high-quality evidence", ""]
             elif ev:
-                vals=[item,ev.result,ev.actual,ev.expected,ev.source_image,round(ev.quality_score,3),ev.message,ev.error_code]
+                vals = [item, ev.result, ev.actual, ev.expected, ev.source_image, ROLE_LABELS.get(ev.photo_role, ev.photo_role), round(ev.quality_score, 3), ev.message, ev.error_code]
             else:
-                vals=[item,"NEED_MORE_IMAGE","","","","","No usable evidence",""]
-            for col,v in enumerate(vals): out.write(r,col,v,c)
-        imgs=wb.add_worksheet("Image_Evidence")
-        imgs.write_row(0,0,["Item","Evidence Image","Result","Quality Score","Actual","Message"],h)
-        rr=1
-        for item,ev in result.evidence.items():
-            imgs.write_row(rr,0,[item,ev.source_image,ev.result,round(ev.quality_score,3),ev.actual,ev.message],c); rr+=1
-        for item,evs in result.conflicts.items():
-            for ev in evs:
-                imgs.write_row(rr,0,[item,ev.source_image,"CONFLICT:"+ev.result,round(ev.quality_score,3),ev.actual,ev.message],c); rr+=1
+                vals = [item, "NEED_MORE_IMAGE", "", "", "", "", "", "No usable evidence", ""]
+            for col, v in enumerate(vals): out.write(r, col, v, c)
+
+        photos = wb.add_worksheet("Photo_Roles")
+        photos.write_row(0, 0, ["Image", "Detected Role"], h)
+        for rr, (name, role) in enumerate(result.photo_roles.items(), 1):
+            photos.write_row(rr, 0, [name, ROLE_LABELS.get(role, role)], c)
+        photos.set_column(0, 0, 55); photos.set_column(1, 1, 30)
+
+        facts = wb.add_worksheet("Session_Facts")
+        facts.write_row(0, 0, ["Field", "Value", "Source Image", "Quality"], h)
+        for rr, key in enumerate(sorted(result.session_fields), 1):
+            info = result.field_sources.get(key, {})
+            facts.write_row(rr, 0, [key, str(result.session_fields.get(key, "")), info.get("source", ""), round(float(info.get("quality", 0)), 3)], c)
+        facts.set_column(0, 0, 32); facts.set_column(1, 1, 45); facts.set_column(2, 2, 55); facts.set_column(3, 3, 12)
+
         wb.close()
         return str(p)

@@ -1,8 +1,18 @@
-# Label Auto Inspection Tool V1.7.8
+# Label Auto Inspection Tool V1.7.9
+
+## V1.7.9 main changes
+- Image Label Inspection now follows a guided five-photo evidence plan: Full Label + Basic/Logo + WiFi/User + Identity/Barcode + Compliance/Artwork.
+- Partial close-ups are no longer required to pass full-label perspective registration before their text/barcode evidence can be used.
+- Original-photo full-frame barcode/QR decode and OCR evidence are fused across photos, then relationship rules are re-run at session level.
+- Full overview supplies artwork relative-position evidence; Basic/Compliance close-ups may supply higher-resolution artwork shape evidence.
+- Additional photos can still be added with Recheck Unresolved.
+- Image reports now include Photo_Roles and Session_Facts sheets.
+- Live Camera / Smart Lock pipeline is not changed by this release.
+
 
 Windows GUI label inspection tool for GRG-4297u Chassis Label and Inner Box Label.
 
-## V1.7.8 main changes
+## V1.7.9 main changes
 
 - Adds **Image Label Inspection** production mode.
 - Users can select multiple JPG/JPEG/PNG/BMP images in one batch.
@@ -28,7 +38,7 @@ Multi-image sessions: `image_records/`
 Each multi-image session contains source images, per-image diagnostic outputs, `execution.log`, `test.log`, `debug.log`, `result.json`, and `Label_Image_Inspection_Report_*.xlsx`.
 
 
-## V1.7.8 hotfix
+## V1.7.9 hotfix
 
 - Fixes GitHub Ruff F821 failure in multi-image `Add Images` UI path display.
 - Reuses the already imported `os.path.basename()` instead of the undefined `Path` symbol.
@@ -36,7 +46,7 @@ Each multi-image session contains source images, per-image diagnostic outputs, `
 - No inspection algorithm, Artwork, OCR, Barcode, Camera, Smart Lock, or report logic was changed.
 
 
-## V1.7.8
+## V1.7.9
 - Non-blocking background worker for multi-image inspection with progress/cancel.
 - Recheck Unresolved keeps prior evidence and filters new evidence to unresolved/conflict items.
 - Per-image performance.log.

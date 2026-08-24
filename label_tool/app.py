@@ -244,6 +244,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=7,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=8,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=8,sticky="w",pady=(2,0))
+        ttk.Label(top,text="Recommended set: Full Label + Basic/Logo + WiFi/User + Identity/Barcode + Compliance/Artwork (additional detail photos allowed)",foreground="#555555").grid(row=3,column=0,columnspan=8,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -1571,7 +1572,7 @@ class App(tk.Tk):
         self.image_paths=paths
         self.multi_image_result=None
         self.image_path.set(f"{len(paths)} image(s): {os.path.basename(paths[0])}")
-        self.image_batch_var.set(f"Images: {len(paths)} | Initial batch ready")
+        self.image_batch_var.set(f"Images: {len(paths)} | Initial batch ready | Guided 5-photo plan active")
         self._show_image(paths[0],self.image_preview)
 
     def add_images(self):
@@ -1579,7 +1580,7 @@ class App(tk.Tk):
         if not paths:return
         self.image_paths.extend(paths)
         self.image_path.set(f"{len(self.image_paths)} image(s): {os.path.basename(self.image_paths[0])}")
-        self.image_batch_var.set(f"Images: {len(self.image_paths)} | Added {len(paths)} image(s)")
+        self.image_batch_var.set(f"Images: {len(self.image_paths)} | Added {len(paths)} image(s) | supplements unresolved items")
         self._show_image(paths[-1],self.image_preview)
 
     def _show_image(self,path,label):
