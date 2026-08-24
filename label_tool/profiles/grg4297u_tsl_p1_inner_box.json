@@ -1,6 +1,6 @@
 {
   "profile_name": "Inner Box Label",
-  "profile_version": "1.7.9",
+  "profile_version": "1.7.9.1",
   "label_type": "Inner Box Label",
   "source_spec": "680010-353 GRG-4297u-TSL-P1 738125-00X Inner Box Label Request Form V3.0 (2025/11/03)",
   "model": "GRG-4297u",
@@ -46,8 +46,8 @@
     "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds.",
     "V1.7.6.1 Chassis CLASS 1 LASER PRODUCT uses normalized-label targeted OCR; session Excel is saved on PASS and manual stop/incomplete runs.",
     "V1.7.7 Inner Box COMTREND uses field-calibrated Golden ROI/shape bands to reduce long borderline scan time without changing other artwork symbols.",
-    "V1.7.9 Image Label Inspection uses guided multi-photo evidence: Full Label + Basic + WiFi + Identity + Compliance. Partial close-ups are not forced through full-label registration.",
-    "V1.7.9 fuses raw facts across photos and re-runs session-level relationship rules; full-label overview supplies artwork position while close-ups may supply artwork shape evidence."
+    "V1.7.9.1 Image Label Inspection uses guided multi-photo evidence: Full Label + Basic + WiFi + Identity + Compliance. Partial close-ups are not forced through full-label registration.",
+    "V1.7.9.1 fuses raw facts across photos and re-runs session-level relationship rules; full-label overview supplies artwork position while close-ups may supply artwork shape evidence."
   ],
   "artwork_verification": {
     "status": "ENABLED_SHAPE_POSITION",

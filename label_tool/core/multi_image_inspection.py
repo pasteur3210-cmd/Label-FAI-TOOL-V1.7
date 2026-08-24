@@ -120,7 +120,7 @@ class MultiImageResult:
 
 
 class MultiImageInspectionEngine:
-    """V1.7.9 guided multi-photo inspection.
+    """V1.7.9.1 guided multi-photo inspection.
 
     Recommended capture set:
       1) Full Label overview
@@ -221,7 +221,12 @@ class MultiImageInspectionEngine:
             scores["IDENTITY"] += 2
         active = sum(1 for v in scores.values() if v >= 2)
         total_hits = sum(scores.values())
-        if active >= 3 or total_hits >= 9:
+        # In the recommended 5-photo workflow image #1 is the overview.
+        # Close-ups can contain several neighbouring groups and must not be
+        # promoted to FULL merely because OCR sees many fields.  This was the
+        # root cause of 3/5 photos being classified FULL in the 2026-08-24
+        # field record.
+        if total < 5 and (active >= 3 or total_hits >= 9):
             return "FULL"
         best_role, best_score = max(scores.items(), key=lambda kv: kv[1])
         if best_score > 0:
@@ -240,8 +245,23 @@ class MultiImageInspectionEngine:
             return [], []
 
     def _ocr_original(self, image):
+        """OCR a static photo at a camera-like working resolution.
+
+        Phone photos are commonly 3k-8k pixels wide. RapidOCR is much more
+        stable on the same label when the long edge is near the live-camera
+        working resolution.  V1.7.9.1 therefore downsizes only for OCR; the
+        original high-resolution image remains available for artwork/barcodes.
+        """
         try:
-            txt, _ = self.base.ocr.read(normalize_for_ocr(image))
+            work = image
+            if work is not None and getattr(work, "size", 0):
+                h, w = work.shape[:2]
+                long_edge = max(h, w)
+                max_edge = 1800
+                if long_edge > max_edge:
+                    scale = max_edge / float(long_edge)
+                    work = cv2.resize(work, (max(1, int(w*scale)), max(1, int(h*scale))), interpolation=cv2.INTER_AREA)
+            txt, _ = self.base.ocr.read(normalize_for_ocr(work))
             return txt or ""
         except Exception as exc:
             log.warning("MULTI_IMAGE_ORIGINAL_OCR_ERROR %s", exc)
@@ -273,6 +293,51 @@ class MultiImageInspectionEngine:
                     items.append(item)
         return items
 
+    def _visual_compliance_override(self, image, role: str) -> str:
+        """Use compliance-symbol shapes to rescue a misclassified close-up.
+
+        A compliance close-up may also contain one GPON barcode and can be
+        incorrectly classified as IDENTITY when OCR misses the small words.
+        Two independently detected compliance symbols are strong evidence that
+        the photo is the Compliance / Artwork view.
+        """
+        if role in ("FULL", "COMPLIANCE"):
+            return role
+        req = [x for x in self._role_items().get("COMPLIANCE", set()) if str(x).startswith("Artwork: ")]
+        if not req:
+            return role
+        try:
+            _rows, dets = self.artwork.evaluate_shape_only(image, requested_items=req)
+            passes = [d for d in dets if getattr(d, "shape_state", "") == "PASS"]
+            if len(passes) >= 2:
+                return "COMPLIANCE"
+        except Exception as exc:
+            log.debug("MULTI_IMAGE_ROLE_VISUAL_OVERRIDE_ERROR %s", exc)
+        return role
+
+    @staticmethod
+    def _force_fact(result: MultiImageResult, key: str, value, source: str, quality: float, reason: str = ""):
+        if value in (None, "", False):
+            return
+        result.session_fields[key] = value
+        result.field_sources[key] = {
+            "source": source, "quality": float(quality), "value": value,
+            "reason": reason or "forced evidence precedence",
+        }
+
+    def _reconcile_machine_readable_wifi_key(self, result: MultiImageResult, raw_fields: dict, source: str, quality: float):
+        """Prefer an exact printed OCR candidate that agrees with decoded QR.
+
+        WiFi keys are case-sensitive.  A high-quality general OCR frame may
+        confuse Z/z while a later close-up reads the exact QR value.  Global
+        image quality must not cause the wrong-case OCR to overwrite that exact
+        case evidence.
+        """
+        printed = str(raw_fields.get("wifi_key", "") or "")
+        qr = str(raw_fields.get("qr_wifi_key", "") or result.session_fields.get("qr_wifi_key", "") or "")
+        if printed and qr and printed == qr:
+            self._force_fact(result, "wifi_key", printed, source, quality, "exact case-sensitive match to decoded WiFi QR")
+
     def _role_allows(self, role: str, item: str) -> bool:
         if role in ("FULL", "DETAIL"):
             return True
@@ -286,12 +351,13 @@ class MultiImageInspectionEngine:
             one=InspectionResult(overall="IMAGE_NG",error_codes=["IMG-001"])
             return one, [], {}, "DETAIL", {}, {}, {}
 
-        # V1.7.9 starts from the ORIGINAL photo. This is the critical difference
+        # V1.7.9.1 starts from the ORIGINAL photo. This is the critical difference
         # from the legacy offline path: a close-up photo is useful evidence even
         # when it cannot be reconstructed into a whole-label perspective view.
         direct_fields, raw_text, decoded_texts, _decoded = self._direct_original_facts(image)
         total = int(getattr(self, "_batch_total", index) or index)
         role = self.classify_photo_role(direct_fields, decoded_texts, raw_text, index, total)
+        role = self._visual_compliance_override(image, role)
         qscore = self._direct_quality_score(image)
         direct_quality_ok = self._sharpness(image) >= 18.0 and self._contrast(image) >= 8.0
         direct_rows = validate(direct_fields, self.profile, expected_work_order=expected or {})
@@ -398,12 +464,28 @@ class MultiImageInspectionEngine:
         fields["sn"] = fields.get("sn_barcode") or fields.get("sn_text", "")
         fields["mac"] = fields.get("mac_barcode") or fields.get("mac_text", "")
         fields["gpon_sn"] = fields.get("gpon_sn_barcode") or fields.get("gpon_sn_text", "")
+        printed_key = str(fields.get("wifi_key", "") or "")
+        qr_key = str(fields.get("qr_wifi_key", "") or "")
+        case_only_key_mismatch = bool(printed_key and qr_key and printed_key != qr_key and printed_key.casefold() == qr_key.casefold())
         rows = validate(fields, self.profile, expected_work_order=expected or {})
         for row in rows:
             if row.name not in self._required_items():
                 continue
+            if row.name == "Consistency: QR Key vs Printed WiFi Key" and case_only_key_mismatch:
+                # Never turn a Z/z OCR ambiguity into a hard FAIL/CONFLICT.
+                # An exact case-sensitive candidate from another photo is
+                # promoted by _reconcile_machine_readable_wifi_key; otherwise
+                # ask for another image.
+                best[row.name] = ImageEvidence(
+                    row.name, "NEED_MORE_IMAGE", printed_key, qr_key, "SESSION_FUSION", 0.90,
+                    "Case-sensitive WiFi Key ambiguous (e.g. Z/z); add a clearer WiFi/User photo",
+                    "XCHK-QR-KEY-CASE", "SESSION"
+                )
+                conflicts.pop(row.name, None)
+                continue
             # Session-level rules can combine facts from different photos.
             if row.status == "PASS":
+                conflicts.pop(row.name, None)
                 src_keys = []
                 for k, info in result.field_sources.items():
                     if str(info.get("value", "")) and str(info.get("value", "")) in str(row.actual) + str(row.expected):
@@ -429,12 +511,21 @@ class MultiImageInspectionEngine:
             s = result.closeup_shape_evidence.get(item)
             if not p or not s:
                 continue
-            if p.get("position_state") == "PASS" and s.get("shape_state") == "PASS":
+            pos_state = p.get("position_state")
+            pos_err = float(p.get("position_error", 999.0))
+            shape_ok = s.get("shape_state") == "PASS"
+            # Multi-image corroboration: the overview remains the position
+            # source. A position in the narrow VERIFY dead-band may be accepted
+            # only when a separate close-up independently confirms shape.
+            # This is not a size check and does not accept a position FAIL.
+            position_ok = pos_state == "PASS" or (pos_state == "VERIFY" and pos_err <= 1.10 and float(p.get("quality",0.0)) >= 0.45)
+            if position_ok and shape_ok:
                 q = min(1.0, (float(p.get("quality",0.0)) + float(s.get("quality",0.0))) / 2.0 + 0.15)
+                corroborated = pos_state == "VERIFY"
                 ev = ImageEvidence(
                     item=item, result="PASS", actual="Shape+Position PASS", expected="Shape + relative position; size ignored",
                     source_image=f"{p.get('source','')} + {s.get('source','')}", quality_score=q,
-                    message=(f"Multi-photo artwork fusion: overview position PASS err={p.get('position_error',999):.2f}; "
+                    message=(f"Multi-photo artwork fusion: overview position {'VERIFY-corroborated' if corroborated else 'PASS'} err={pos_err:.2f}; "
                              f"close-up shape PASS score={s.get('score',0):.3f}; size ignored"),
                     photo_role="SESSION",
                 )
@@ -529,6 +620,9 @@ class MultiImageInspectionEngine:
             for key, value in raw_fields.items():
                 if key in RAW_FIELD_KEYS:
                     self._merge_fact(result, key, value, src_path.name, float(diag.get("quality",0.0)))
+            self._reconcile_machine_readable_wifi_key(
+                result, raw_fields, src_path.name, float(diag.get("quality",0.0))
+            )
 
             for item, info in art_pos.items():
                 old = result.position_evidence.get(item)
