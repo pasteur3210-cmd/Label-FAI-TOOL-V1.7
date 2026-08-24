@@ -1,24 +1,28 @@
-# Label Auto Inspection Tool V1.7.6.1
+# Label Auto Inspection Tool V1.7.7
 
-GitHub Build Ready repository.
+Windows GUI label inspection tool for GRG-4297u Chassis Label and Inner Box Label.
 
-## Profiles
-- Chassis Label
-- Inner Box Label
+## V1.7.7 main changes
 
-Both profiles support Artwork shape + relative-position verification. Printed Artwork size remains **not judged**.
-
-## V1.7.6.1 main changes
-- Artwork still runs only in the active Artwork production zone; OCR/Barcode zones remain on the original fast path.
-- Chassis/Inner Box operator guide changed from many small symbol contours to a stable whole-label outline plus 3 broad anchors.
-- The operator guide is static and does not jump with each registration candidate. It is placement guidance only, not a size gauge.
-- Shape and position decisions now use PASS / VERIFY / FAIL dead-bands. Borderline camera jitter is held as VERIFY/WARN and does not accumulate false NG.
-- Registered Golden ROI search is retained. Artwork size remains ignored for PASS/FAIL.
-- Existing V1.7.4 Artwork registration calibration is preserved to avoid disturbing the proven OCR/Barcode pipeline.
-- Unicode/space-safe Golden Artwork loading, resource self-test, manual zone navigation, Retry Zone, and serialized Auto Focus behavior from V1.7.4 are retained.
-- New regression tests include V1.7.4 field-log boundary cases and a fast-path guard proving empty Artwork requests do not run registration.
+- Adds **Image Label Inspection** production mode.
+- Users can select multiple JPG/JPEG/PNG/BMP images in one batch.
+- Per-item evidence fusion keeps the best usable image for each required check.
+- Blurry/unreadable observations become `NEED_MORE_IMAGE` instead of automatic NG.
+- `Add Images / Recheck Unresolved` can supplement the same inspection session.
+- S/N, MAC and GPON S/N are used as cross-image identity consistency gates.
+- Conflicting high-quality PASS/FAIL evidence is surfaced as `CONFLICT` and is not silently overwritten.
+- Multi-image sessions save `execution.log`, `test.log`, `debug.log`, `result.json`, source images and an Excel report under `image_records/`.
+- Inner Box COMTREND Artwork threshold band was field-calibrated from the 2026-08-24 live log. Replay predicts the two required PASS observations around the earlier valid cycles instead of waiting until the final 58-second borderline period.
+- Existing Live Camera / Smart Lock flow remains separate and unchanged except for the COMTREND profile calibration.
 
 ## Build
-GitHub Actions workflow: `.github/workflows/build.yml`
 
-Upload the contents of `01_GITHUB_UPLOAD` to the repository root. `02_ENGINEERING_DOCUMENTS` is for local engineering records and does not need to be uploaded to GitHub.
+Upload the contents of this repository to GitHub and run the Windows Actions workflow. The workflow installs dependencies, runs Ruff F821, compile checks, full unit/regression tests, then builds the PyInstaller Windows package and runs packaged OCR/Artwork smoke tests.
+
+## Runtime records
+
+Live Camera sessions: `live_records/`
+
+Multi-image sessions: `image_records/`
+
+Each multi-image session contains source images, per-image diagnostic outputs, `execution.log`, `test.log`, `debug.log`, `result.json`, and `Label_Image_Inspection_Report_*.xlsx`.

@@ -14,6 +14,7 @@ from PIL import Image, ImageTk
 
 from . import __version__
 from .core.engine import InspectionEngine
+from .core.multi_image_inspection import MultiImageInspectionEngine
 from .core.profile_manager import discover_profiles
 from .core.camera_manager import CameraManager
 from .core.live_engine import LiveFrameAnalyzer, LOCK_TO_FIELD
@@ -95,6 +96,9 @@ class App(tk.Tk):
         self.profile_var = tk.StringVar()
         self.profile_info_var = tk.StringVar()
         self.image_path = tk.StringVar()
+        self.image_paths = []
+        self.multi_image_result = None
+        self.image_batch_var = tk.StringVar(value="Images: 0 | Ready")
         self.expected_pn = tk.StringVar()
         self.expected_country = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
@@ -136,7 +140,7 @@ class App(tk.Tk):
         self.live_tab = ttk.Frame(nb)
         self.image_tab = ttk.Frame(nb)
         nb.add(self.live_tab, text="Live Camera / Smart Lock")
-        nb.add(self.image_tab, text="Offline Image Debug")
+        nb.add(self.image_tab, text="Image Label Inspection")
         self._build_live_tab()
         self._build_image_tab()
 
@@ -223,18 +227,22 @@ class App(tk.Tk):
 
     def _build_image_tab(self):
         top=ttk.Frame(self.image_tab,padding=8); top.pack(fill="x")
-        ttk.Label(top,text="Image:").grid(row=0,column=0,sticky="w")
-        ttk.Entry(top,textvariable=self.image_path,width=90).grid(row=0,column=1,padx=5,sticky="ew")
-        ttk.Button(top,text="Select JPG/PNG",command=self.select_image).grid(row=0,column=2,padx=5)
-        ttk.Button(top,text="Start Inspection",command=self.inspect_image).grid(row=0,column=3,padx=5)
+        ttk.Label(top,text="Images:").grid(row=0,column=0,sticky="w")
+        ttk.Entry(top,textvariable=self.image_path,width=80,state="readonly").grid(row=0,column=1,padx=5,sticky="ew")
+        ttk.Button(top,text="Load Images...",command=self.select_images).grid(row=0,column=2,padx=4)
+        ttk.Button(top,text="Add Images",command=self.add_images).grid(row=0,column=3,padx=4)
+        ttk.Button(top,text="Run Inspection",command=self.inspect_images).grid(row=0,column=4,padx=4)
+        ttk.Button(top,text="Recheck Unresolved",command=self.recheck_unresolved).grid(row=0,column=5,padx=4)
+        ttk.Button(top,text="Reset Session",command=self.reset_image_session).grid(row=0,column=6,padx=4)
+        ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=7,sticky="w",pady=(5,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
-        self.image_preview=ttk.Label(left,anchor="center",relief="sunken"); self.image_preview.pack(fill="both",expand=True)
+        self.image_preview=ttk.Label(left,anchor="center",relief="sunken",text="Load one or more label photos"); self.image_preview.pack(fill="both",expand=True)
         self.image_overall=tk.Label(right,text="--",font=("Segoe UI",26,"bold")); self.image_overall.pack(fill="x")
-        cols=("item","actual","expected","status","code","message")
+        cols=("item","result","actual","expected","source","quality","message")
         self.image_tree=ttk.Treeview(right,columns=cols,show="headings",height=28)
-        widths={"item":280,"actual":230,"expected":260,"status":90,"code":110,"message":300}
+        widths={"item":270,"result":120,"actual":190,"expected":210,"source":190,"quality":90,"message":320}
         for c in cols:
             self.image_tree.heading(c,text=c.title()); self.image_tree.column(c,width=widths[c],anchor="w")
         self.image_tree.pack(fill="both",expand=True)
@@ -250,6 +258,7 @@ class App(tk.Tk):
         if not name or name not in self.profiles:return
         path,data=self.profiles[name]
         self.engine=InspectionEngine(data)
+        self.multi_image_engine=MultiImageInspectionEngine(data, software_version=__version__)
         self.live_analyzer=LiveFrameAnalyzer(data)
         self.fast_reader=FastMachineReader(data)
         self.guided_ocr=DirectGuidedOCR(data, ocr_backend=self.ocr_service)
@@ -1541,30 +1550,88 @@ class App(tk.Tk):
         self.live_state_var.set('Live: READY - NEW UNIT'); self.guided_ocr_var.set('OCR: --'); self.guided_quality_var.set('Target: --'); self._update_zone_ui()
         log.info('NEW_UNIT_RESET explicit=True')
 
-    def select_image(self):
-        p=filedialog.askopenfilename(title='Select Label Photo',filetypes=[('Image','*.jpg *.jpeg *.png *.bmp'),('All Files','*.*')])
-        if p:self.image_path.set(p); self._show_image(p,self.image_preview)
+    def _pick_images(self):
+        return list(filedialog.askopenfilenames(
+            title='Select Label Photos',
+            filetypes=[('Images','*.jpg *.jpeg *.png *.bmp'),('All Files','*.*')]
+        ))
+
+    def select_images(self):
+        paths=self._pick_images()
+        if not paths:return
+        self.image_paths=paths
+        self.multi_image_result=None
+        self.image_path.set(f"{len(paths)} image(s): {os.path.basename(paths[0])}")
+        self.image_batch_var.set(f"Images: {len(paths)} | Initial batch ready")
+        self._show_image(paths[0],self.image_preview)
+
+    def add_images(self):
+        paths=self._pick_images()
+        if not paths:return
+        self.image_paths.extend(paths)
+        self.image_path.set(f"{len(self.image_paths)} image(s): {Path(self.image_paths[0]).name}")
+        self.image_batch_var.set(f"Images: {len(self.image_paths)} | Added {len(paths)} image(s)")
+        self._show_image(paths[-1],self.image_preview)
 
     def _show_image(self,path,label):
         try:
-            img=Image.open(path); img.thumbnail((700,650)); photo=ImageTk.PhotoImage(img); label.config(image=photo); label.image=photo
+            img=Image.open(path); img.thumbnail((700,650)); photo=ImageTk.PhotoImage(img); label.config(image=photo,text=''); label.image=photo
         except Exception as e:messagebox.showerror('Image Error',str(e))
 
-    def inspect_image(self):
-        p=self.image_path.get().strip()
-        if not p:messagebox.showwarning('No Image','Select image first'); return
+    def _render_multi_image_result(self,result):
+        color='green' if result.overall=='PASS' else ('#B8860B' if result.overall=='NEED_MORE_IMAGE' else 'red')
+        self.image_overall.config(text=result.overall,fg=color)
+        for x in self.image_tree.get_children():self.image_tree.delete(x)
+        required=self.multi_image_engine._required_items()
+        for item in required:
+            if item in result.conflicts:
+                self.image_tree.insert('', 'end',values=(item,'CONFLICT','','','Multiple images','','Conflicting evidence'))
+                continue
+            ev=result.evidence.get(item)
+            if ev:
+                self.image_tree.insert('', 'end',values=(item,ev.result,ev.actual,ev.expected,ev.source_image,f"{ev.quality_score:.3f}",ev.message))
+            else:
+                self.image_tree.insert('', 'end',values=(item,'NEED_MORE_IMAGE','','','','','No usable evidence'))
+        self.image_batch_var.set(
+            f"Images: {result.image_count} | Identity: {result.identity_status} | "
+            f"Need more: {len(result.unresolved_items)} | Report: {result.report_path}"
+        )
+        self.status_var.set(f"Multi-image inspection {result.overall} | {result.session_dir}")
+
+    def inspect_images(self):
+        if not self.image_paths:
+            messagebox.showwarning('No Images','Load one or more label images first'); return
         try:
-            result=self.engine.inspect(p,'inspection_results',self._expected())
-            self.image_overall.config(text=result.overall,fg=('green' if result.overall=='PASS' else 'red'))
-            for x in self.image_tree.get_children():self.image_tree.delete(x)
-            if result.quality:
-                q=result.quality
-                for vals in [('Image Sharpness',f'{q.sharpness:.1f}','profile threshold','PASS' if q.sharpness_pass else 'FAIL','IMG-SHARP',''),('Image Brightness',f'{q.brightness:.1f}','profile range','PASS' if q.brightness_pass else 'FAIL','IMG-BRIGHT',''),('Image Contrast',f'{q.contrast:.1f}','profile threshold','PASS' if q.contrast_pass else 'FAIL','IMG-CONTRAST','')]:self.image_tree.insert('', 'end',values=vals)
-            for r in result.fields:self.image_tree.insert('', 'end',values=(r.name,r.actual,r.expected,r.status,r.error_code,r.message))
-            if result.marked_image_path:self._show_image(result.marked_image_path,self.image_preview)
-            self.status_var.set(f"Offline done | {result.overall} | {result.debug_dir}")
+            self.multi_image_result=self.multi_image_engine.inspect_batch(
+                list(self.image_paths),'image_records',self._expected(),previous_session=None
+            )
+            self._render_multi_image_result(self.multi_image_result)
         except Exception as e:
-            log.exception('OFFLINE_INSPECTION_FAIL'); messagebox.showerror('Inspection Error',str(e))
+            log.exception('MULTI_IMAGE_INSPECTION_ERROR')
+            messagebox.showerror('Image Inspection Error',str(e))
+
+    def recheck_unresolved(self):
+        if self.multi_image_result is None:
+            messagebox.showinfo('Recheck','Run the initial batch first.'); return
+        paths=self._pick_images()
+        if not paths:return
+        try:
+            self.image_paths.extend(paths)
+            self.multi_image_result=self.multi_image_engine.inspect_batch(
+                paths,'image_records',self._expected(),previous_session=self.multi_image_result
+            )
+            self._render_multi_image_result(self.multi_image_result)
+            self._show_image(paths[-1],self.image_preview)
+        except Exception as e:
+            log.exception('MULTI_IMAGE_RECHECK_ERROR')
+            messagebox.showerror('Recheck Error',str(e))
+
+    def reset_image_session(self):
+        self.image_paths=[]; self.multi_image_result=None; self.image_path.set('')
+        self.image_batch_var.set('Images: 0 | Ready')
+        self.image_overall.config(text='--',fg='black')
+        self.image_preview.config(image='',text='Load one or more label photos'); self.image_preview.image=None
+        for x in self.image_tree.get_children():self.image_tree.delete(x)
 
     def destroy(self):
         try:self.stop_live()

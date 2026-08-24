@@ -4,7 +4,7 @@ from pathlib import Path
 class ProfileTests(unittest.TestCase):
     def test_profile_v171(self):
         d=json.loads(Path("label_tool/profiles/grg4297u_tsl_p1.json").read_text(encoding="utf-8"))
-        self.assertEqual(d["profile_version"],"1.7.6.1")
+        self.assertEqual(d["profile_version"],"1.7.7")
         self.assertIn("rois",d)
         self.assertIn("sn_barcode",d["rois"])
         self.assertEqual(d["rules"]["pn_display"],"738125-00X")

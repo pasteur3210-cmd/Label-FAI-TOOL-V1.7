@@ -109,3 +109,28 @@ def run_artwork_self_test(output_path='artwork_self_test.json'):
     payload['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
     return rc
+
+
+def run_multi_image_self_test(output_path='multi_image_self_test.json'):
+    """Packaged-runtime smoke: multi-image module, fusion model and Excel writer."""
+    from tempfile import TemporaryDirectory
+    from .core.multi_image_inspection import MultiImageInspectionEngine, MultiImageResult, ImageEvidence
+    out=Path(output_path); out.parent.mkdir(parents=True,exist_ok=True)
+    payload={'test':'EXE_MULTI_IMAGE_SMOKE','passed':False}
+    rc=0
+    try:
+        profile={'profile_name':'Smoke','label_type':'Test','live':{'required_items':['Artwork: COMTREND Logo']}}
+        eng=MultiImageInspectionEngine(profile,software_version='self-test')
+        with TemporaryDirectory() as td:
+            r=MultiImageResult(overall='PASS',session_id='smoke',session_dir=td,image_count=2,initial_image_count=2,identity_status='PASS')
+            r.evidence['Artwork: COMTREND Logo']=ImageEvidence('Artwork: COMTREND Logo','PASS','Shape+Position PASS','Expected','img2.jpg',0.9,'smoke','')
+            report=eng._write_excel(r,{})
+            payload['report_created']=Path(report).exists()
+            payload['module']='label_tool.core.multi_image_inspection'
+            payload['passed']=bool(payload['report_created'])
+            if not payload['passed']: rc=3
+    except Exception as exc:
+        payload['error']=repr(exc); rc=2
+    payload['completed_at']=time.strftime('%Y-%m-%dT%H:%M:%S')
+    out.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
+    return rc

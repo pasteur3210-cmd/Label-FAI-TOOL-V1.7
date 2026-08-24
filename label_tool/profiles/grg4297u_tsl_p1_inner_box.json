@@ -1,6 +1,6 @@
 {
   "profile_name": "Inner Box Label",
-  "profile_version": "1.7.6.1",
+  "profile_version": "1.7.7",
   "label_type": "Inner Box Label",
   "source_spec": "680010-353 GRG-4297u-TSL-P1 738125-00X Inner Box Label Request Form V3.0 (2025/11/03)",
   "model": "GRG-4297u",
@@ -44,7 +44,8 @@
     "For position judgment the whole Inner Box Label must be visible so the label can be normalized.",
     "V1.7.5 Artwork operator guide uses whole-label outline plus broad anchors; small-logo contour matching is machine-only.",
     "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds.",
-    "V1.7.6.1 Chassis CLASS 1 LASER PRODUCT uses normalized-label targeted OCR; session Excel is saved on PASS and manual stop/incomplete runs."
+    "V1.7.6.1 Chassis CLASS 1 LASER PRODUCT uses normalized-label targeted OCR; session Excel is saved on PASS and manual stop/incomplete runs.",
+    "V1.7.7 Inner Box COMTREND uses field-calibrated Golden ROI/shape bands to reduce long borderline scan time without changing other artwork symbols."
   ],
   "artwork_verification": {
     "status": "ENABLED_SHAPE_POSITION",
@@ -67,7 +68,7 @@
         "required": true,
         "template": "grg4297u_inner_box/comtrend_logo.png",
         "presence_threshold": 0.58,
-        "shape_threshold": 0.34,
+        "shape_threshold": 0.3,
         "detect_scales": [
           0.35,
           0.45,
@@ -81,7 +82,10 @@
           1.6,
           1.9,
           2.2
-        ]
+        ],
+        "shape_fail_threshold": 0.22,
+        "shape_verify_margin": 0.08,
+        "detector_note": "V1.7.7 field-calibrated stable shape band from 2026-08-24 camera logs. Replay predicts 2 consecutive PASS around cycle 210-211 instead of cycle 304-305; Golden-relative position gate remains required; size remains ignored."
       },
       {
         "id": "recycling_mark",

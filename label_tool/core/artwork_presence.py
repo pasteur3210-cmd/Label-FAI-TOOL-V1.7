@@ -295,8 +295,9 @@ class ArtworkPresenceDetector:
             return normalized, (0.0, 0.0)
         tol = cfg.get("position_tolerance", self.position_tolerance)
         tx, ty = float(tol[0]), float(tol[1])
-        half_x = min(0.48, max(0.07, tx * self.search_roi_expand))
-        half_y = min(0.48, max(0.07, ty * self.search_roi_expand))
+        expand = float(cfg.get("search_roi_expand", self.search_roi_expand))
+        half_x = min(0.48, max(0.07, tx * expand))
+        half_y = min(0.48, max(0.07, ty * expand))
         cx, cy = expected_center
         x1n, y1n = max(0.0, cx-half_x), max(0.0, cy-half_y)
         x2n, y2n = min(1.0, cx+half_x), min(1.0, cy+half_y)
