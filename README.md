@@ -1,8 +1,8 @@
-# Label Auto Inspection Tool V1.7.7
+# Label Auto Inspection Tool V1.7.7.1
 
 Windows GUI label inspection tool for GRG-4297u Chassis Label and Inner Box Label.
 
-## V1.7.7 main changes
+## V1.7.7.1 main changes
 
 - Adds **Image Label Inspection** production mode.
 - Users can select multiple JPG/JPEG/PNG/BMP images in one batch.
@@ -26,3 +26,11 @@ Live Camera sessions: `live_records/`
 Multi-image sessions: `image_records/`
 
 Each multi-image session contains source images, per-image diagnostic outputs, `execution.log`, `test.log`, `debug.log`, `result.json`, and `Label_Image_Inspection_Report_*.xlsx`.
+
+
+## V1.7.7.1 hotfix
+
+- Fixes GitHub Ruff F821 failure in multi-image `Add Images` UI path display.
+- Reuses the already imported `os.path.basename()` instead of the undefined `Path` symbol.
+- Adds a regression test for this exact failure.
+- No inspection algorithm, Artwork, OCR, Barcode, Camera, Smart Lock, or report logic was changed.

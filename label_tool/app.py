@@ -1569,7 +1569,7 @@ class App(tk.Tk):
         paths=self._pick_images()
         if not paths:return
         self.image_paths.extend(paths)
-        self.image_path.set(f"{len(self.image_paths)} image(s): {Path(self.image_paths[0]).name}")
+        self.image_path.set(f"{len(self.image_paths)} image(s): {os.path.basename(self.image_paths[0])}")
         self.image_batch_var.set(f"Images: {len(self.image_paths)} | Added {len(paths)} image(s)")
         self._show_image(paths[-1],self.image_preview)
 
