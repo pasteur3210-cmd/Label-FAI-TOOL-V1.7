@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import logging
 import threading
+import queue
 import os
 import re
 import traceback
@@ -99,6 +100,12 @@ class App(tk.Tk):
         self.image_paths = []
         self.multi_image_result = None
         self.image_batch_var = tk.StringVar(value="Images: 0 | Ready")
+        self.image_progress_var = tk.StringVar(value="Idle")
+        self.image_worker_thread = None
+        self.image_worker_queue = queue.Queue()
+        self.image_cancel_event = threading.Event()
+        self.image_poll_job = None
+        self.image_job_running = False
         self.expected_pn = tk.StringVar()
         self.expected_country = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
@@ -229,12 +236,14 @@ class App(tk.Tk):
         top=ttk.Frame(self.image_tab,padding=8); top.pack(fill="x")
         ttk.Label(top,text="Images:").grid(row=0,column=0,sticky="w")
         ttk.Entry(top,textvariable=self.image_path,width=80,state="readonly").grid(row=0,column=1,padx=5,sticky="ew")
-        ttk.Button(top,text="Load Images...",command=self.select_images).grid(row=0,column=2,padx=4)
-        ttk.Button(top,text="Add Images",command=self.add_images).grid(row=0,column=3,padx=4)
-        ttk.Button(top,text="Run Inspection",command=self.inspect_images).grid(row=0,column=4,padx=4)
-        ttk.Button(top,text="Recheck Unresolved",command=self.recheck_unresolved).grid(row=0,column=5,padx=4)
-        ttk.Button(top,text="Reset Session",command=self.reset_image_session).grid(row=0,column=6,padx=4)
-        ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=7,sticky="w",pady=(5,0))
+        self.image_load_btn=ttk.Button(top,text="Load Images...",command=self.select_images); self.image_load_btn.grid(row=0,column=2,padx=4)
+        self.image_add_btn=ttk.Button(top,text="Add Images",command=self.add_images); self.image_add_btn.grid(row=0,column=3,padx=4)
+        self.image_run_btn=ttk.Button(top,text="Run Inspection",command=self.inspect_images); self.image_run_btn.grid(row=0,column=4,padx=4)
+        self.image_recheck_btn=ttk.Button(top,text="Recheck Unresolved",command=self.recheck_unresolved); self.image_recheck_btn.grid(row=0,column=5,padx=4)
+        self.image_reset_btn=ttk.Button(top,text="Reset Session",command=self.reset_image_session); self.image_reset_btn.grid(row=0,column=6,padx=4)
+        self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=7,padx=4)
+        ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=8,sticky="w",pady=(5,0))
+        ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=8,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -1598,42 +1607,115 @@ class App(tk.Tk):
         )
         self.status_var.set(f"Multi-image inspection {result.overall} | {result.session_dir}")
 
-    def inspect_images(self):
-        if not self.image_paths:
-            messagebox.showwarning('No Images','Load one or more label images first'); return
+    def _set_image_controls_busy(self, busy: bool):
+        self.image_job_running=bool(busy)
+        state_busy="disabled" if busy else "normal"
+        for btn in (self.image_load_btn,self.image_add_btn,self.image_run_btn,self.image_recheck_btn,self.image_reset_btn):
+            try: btn.config(state=state_busy)
+            except Exception: pass
+        try:self.image_cancel_btn.config(state="normal" if busy else "disabled")
+        except Exception:pass
+        # Freeze profile selection while a worker is evaluating a snapshot so
+        # results cannot be rendered under a different label profile.
+        try:self.profile_combo.config(state="disabled" if busy else "readonly")
+        except Exception:pass
+
+    def _image_progress_callback(self, event: dict):
+        self.image_worker_queue.put(("progress",dict(event or {})))
+
+    def _start_image_job(self, paths, previous_session=None, target_items=None, action="initial"):
+        if self.image_job_running:
+            messagebox.showinfo('Image Inspection','An image inspection is already running.'); return
+        if not paths:
+            messagebox.showwarning('No Images','Load one or more label images first.'); return
+        profile_name=self.profile_var.get()
+        if not profile_name or profile_name not in self.profiles:
+            messagebox.showerror('Image Inspection','No valid profile selected.'); return
+        profile=dict(self.profiles[profile_name][1])
+        expected=dict(self._expected())
+        worker_paths=list(paths)
+        previous=previous_session
+        targets=None if target_items is None else set(target_items)
+        self.image_cancel_event.clear()
+        self._set_image_controls_busy(True)
+        self.image_progress_var.set(f"Starting {action} inspection | {len(worker_paths)} image(s)")
+        self.status_var.set('Image inspection running in background...')
+
+        def worker():
+            try:
+                engine=MultiImageInspectionEngine(profile, software_version=__version__)
+                result=engine.inspect_batch(
+                    worker_paths,'image_records',expected,previous_session=previous,
+                    progress_callback=self._image_progress_callback,
+                    cancel_event=self.image_cancel_event,target_items=targets,
+                )
+                self.image_worker_queue.put(("result",result))
+            except Exception as exc:
+                self.image_worker_queue.put(("error",(str(exc),traceback.format_exc())))
+
+        self.image_worker_thread=threading.Thread(target=worker,name='ImageInspectionWorker',daemon=True)
+        self.image_worker_thread.start()
+        self._poll_image_worker()
+
+    def _poll_image_worker(self):
+        processed=False
         try:
-            self.multi_image_result=self.multi_image_engine.inspect_batch(
-                list(self.image_paths),'image_records',self._expected(),previous_session=None
-            )
-            self._render_multi_image_result(self.multi_image_result)
-        except Exception as e:
-            log.exception('MULTI_IMAGE_INSPECTION_ERROR')
-            messagebox.showerror('Image Inspection Error',str(e))
+            while True:
+                kind,payload=self.image_worker_queue.get_nowait(); processed=True
+                if kind=='progress':
+                    stage=payload.get('stage','working')
+                    idx=payload.get('index',0); total=payload.get('total',0)
+                    name=payload.get('image','')
+                    elapsed=payload.get('elapsed_ms')
+                    suffix=f" | {elapsed:.0f} ms" if isinstance(elapsed,(int,float)) else ''
+                    self.image_progress_var.set(f"{stage}: {idx}/{total} {name}{suffix}".strip())
+                elif kind=='result':
+                    self.multi_image_result=payload
+                    self._render_multi_image_result(payload)
+                    self.image_progress_var.set(f"Completed | {payload.image_count} image(s) | {payload.overall}")
+                    self._set_image_controls_busy(False)
+                elif kind=='error':
+                    msg,tb=payload
+                    log.error('MULTI_IMAGE_WORKER_ERROR %s\n%s',msg,tb)
+                    self.image_progress_var.set('Inspection error')
+                    self._set_image_controls_busy(False)
+                    messagebox.showerror('Image Inspection Error',msg)
+        except queue.Empty:
+            pass
+        if self.image_job_running:
+            self.image_poll_job=self.after(100,self._poll_image_worker)
+        elif processed:
+            self.image_poll_job=None
+
+    def cancel_image_inspection(self):
+        if not self.image_job_running:return
+        self.image_cancel_event.set()
+        self.image_progress_var.set('Cancel requested; finishing current stage...')
+
+    def inspect_images(self):
+        self._start_image_job(list(self.image_paths),previous_session=None,target_items=None,action='initial')
 
     def recheck_unresolved(self):
         if self.multi_image_result is None:
             messagebox.showinfo('Recheck','Run the initial batch first.'); return
         paths=self._pick_images()
         if not paths:return
-        try:
-            self.image_paths.extend(paths)
-            self.multi_image_result=self.multi_image_engine.inspect_batch(
-                paths,'image_records',self._expected(),previous_session=self.multi_image_result
-            )
-            self._render_multi_image_result(self.multi_image_result)
-            self._show_image(paths[-1],self.image_preview)
-        except Exception as e:
-            log.exception('MULTI_IMAGE_RECHECK_ERROR')
-            messagebox.showerror('Recheck Error',str(e))
+        self.image_paths.extend(paths)
+        targets=set(self.multi_image_result.unresolved_items) | set(self.multi_image_result.conflicts.keys())
+        self._show_image(paths[-1],self.image_preview)
+        self._start_image_job(paths,previous_session=self.multi_image_result,target_items=targets,action='recheck unresolved')
 
     def reset_image_session(self):
         self.image_paths=[]; self.multi_image_result=None; self.image_path.set('')
         self.image_batch_var.set('Images: 0 | Ready')
+        self.image_progress_var.set('Idle')
         self.image_overall.config(text='--',fg='black')
         self.image_preview.config(image='',text='Load one or more label photos'); self.image_preview.image=None
         for x in self.image_tree.get_children():self.image_tree.delete(x)
 
     def destroy(self):
+        try:self.image_cancel_event.set()
+        except Exception:pass
         try:self.stop_live()
         except Exception:pass
         try:

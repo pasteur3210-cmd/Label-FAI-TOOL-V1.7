@@ -6,7 +6,7 @@ import unittest
 import cv2
 import numpy as np
 
-from label_tool.core.multi_image_inspection import MultiImageInspectionEngine, ImageEvidence
+from label_tool.core.multi_image_inspection import MultiImageInspectionEngine, ImageEvidence, ImageEvidence
 
 class _FakeQuality:
     sharpness=200.0; contrast=60.0; passed=True
@@ -42,6 +42,43 @@ class V177MultiImageTests(unittest.TestCase):
             r.unresolved_items=['Artwork: COMTREND Logo']
             p=self.eng._write_excel(r,{})
             self.assertTrue(Path(p).exists())
+
+
+
+class V178MultiImageStabilityTests(unittest.TestCase):
+    def test_engine_accepts_progress_callback(self):
+        profile=json.loads(Path('label_tool/profiles/grg4297u_tsl_p1_inner_box.json').read_text(encoding='utf-8'))
+        eng=MultiImageInspectionEngine(profile,'1.7.8')
+        events=[]
+        with tempfile.TemporaryDirectory() as td:
+            img=Path(td)/'x.jpg'; cv2.imwrite(str(img),np.full((300,500,3),255,dtype=np.uint8))
+            # replace heavy inspection with deterministic evidence while exercising batch progress/report
+            class _Q: passed=False; sharpness=0.0; contrast=0.0
+            class _One: quality=_Q(); overall='IMAGE_NG'; error_codes=[]
+            def fake_one(path,session,expected,index,target_items=None):
+                return _One(),[]
+            eng._inspect_one=fake_one
+            r=eng.inspect_batch([str(img)],Path(td)/'out',{},progress_callback=events.append)
+            self.assertTrue(any(e.get('stage')=='processing' for e in events))
+            self.assertTrue(any(e.get('stage')=='completed' for e in events))
+            self.assertTrue((Path(r.session_dir)/'performance.log').exists())
+
+    def test_target_items_filter_new_recheck_evidence(self):
+        profile=json.loads(Path('label_tool/profiles/grg4297u_tsl_p1_inner_box.json').read_text(encoding='utf-8'))
+        eng=MultiImageInspectionEngine(profile,'1.7.8')
+        called=[]
+        class _Q: passed=True; sharpness=300.0; contrast=80.0
+        class _One: quality=_Q(); overall='PASS'; error_codes=[]
+        def fake_one(path,session,expected,index,target_items=None):
+            called.append(set(target_items or []))
+            ev=[ImageEvidence('Fixed: model','PASS','GRG-4297u','GRG-4297u',Path(path).name,1.0,'','')]
+            if target_items is not None: ev=[x for x in ev if x.item in target_items]
+            return _One(),ev
+        eng._inspect_one=fake_one
+        with tempfile.TemporaryDirectory() as td:
+            img=Path(td)/'x.jpg'; cv2.imwrite(str(img),np.full((50,50,3),255,dtype=np.uint8))
+            eng.inspect_batch([str(img)],Path(td)/'out',{},target_items={'Fixed: model'})
+        self.assertEqual(called,[{'Fixed: model'}])
 
 if __name__=='__main__': unittest.main()
 

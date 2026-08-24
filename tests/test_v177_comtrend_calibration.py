@@ -13,8 +13,9 @@ class V177ComtrendCalibrationTests(unittest.TestCase):
         s=next(x for x in self.profile['artwork_verification']['symbols'] if x['id']=='comtrend_logo')
         self.assertEqual(s['shape_threshold'],0.30)
         self.assertEqual(s['shape_fail_threshold'],0.22)
+        self.assertEqual(s['detector'],'comtrend_hybrid')
+        self.assertEqual(s['search_roi_expand'],1.35)
         self.assertNotIn('expected_center',s)
-        self.assertNotIn('search_roi_expand',s)
 
     def test_field_final_pass_replay_if_fixture_available(self):
         fixture=Path('tests/fixtures/v177_inner_box_final_pass.jpg')

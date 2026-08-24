@@ -265,6 +265,42 @@ class ArtworkPresenceDetector:
         score, scale, loc, size = best
         return max(0.0, score), scale, loc, size
 
+
+    @staticmethod
+    def _corr_same_size(a, b):
+        if a is None or b is None or not getattr(a,"size",0) or not getattr(b,"size",0):
+            return 0.0
+        if a.shape != b.shape:
+            a=cv2.resize(a,(b.shape[1],b.shape[0]),interpolation=cv2.INTER_AREA)
+        if float(np.std(a))<1e-6 or float(np.std(b))<1e-6:
+            return 0.0
+        v=float(cv2.matchTemplate(a,b,cv2.TM_CCOEFF_NORMED)[0,0])
+        return max(0.0,min(1.0,v))
+
+    def _best_match_comtrend(self, frame, templ, scales):
+        """Text-logo specialist: locate with binary match, then normalize the
+        candidate and combine grayscale/edge evidence. Printed size remains
+        ignored; resize is only a comparison normalization step."""
+        base_score, scale, loc, size = self._best_match(frame,templ,scales)
+        if size==(0,0):
+            return base_score,scale,loc,size,{"binary":base_score,"gray":0.0,"edge":0.0}
+        x,y=loc; w,h=size
+        crop=frame[y:y+h,x:x+w]
+        if crop is None or not getattr(crop,"size",0):
+            return base_score,scale,loc,size,{"binary":base_score,"gray":0.0,"edge":0.0}
+        cg=crop if crop.ndim==2 else cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
+        tg=templ if templ.ndim==2 else cv2.cvtColor(templ,cv2.COLOR_BGR2GRAY)
+        cg=cv2.resize(cg,(tg.shape[1],tg.shape[0]),interpolation=cv2.INTER_AREA)
+        cg=cv2.equalizeHist(cg); tge=cv2.equalizeHist(tg)
+        gray=self._corr_same_size(cg,tge)
+        ce=cv2.Canny(cg,50,150); te=cv2.Canny(tge,50,150)
+        edge=self._corr_same_size(ce,te)
+        # Conservative fusion: binary location evidence remains important, but
+        # normalized edge/gray structure can rescue correct logos affected by
+        # focus/exposure without lowering the general symbol thresholds.
+        hybrid=max(base_score, 0.35*base_score + 0.25*gray + 0.40*edge)
+        return float(hybrid),scale,loc,size,{"binary":base_score,"gray":gray,"edge":edge}
+
     def _calibrate_expected_geometry(self):
         if self.golden_layout is None or not getattr(self.golden_layout, "size", 0):
             return
@@ -412,7 +448,12 @@ class ArtworkPresenceDetector:
 
             search_roi, origin = self._search_roi(normalized, expected_center, cfg)
             scales = cfg.get("detect_scales") or self.DEFAULT_SCALES
-            score, best_scale, loc, size = self._best_match(search_roi, templ, scales)
+            detector=str(cfg.get("detector","default"))
+            components=None
+            if detector=="comtrend_hybrid" or str(cfg.get("id",""))=="comtrend_logo":
+                score, best_scale, loc, size, components = self._best_match_comtrend(search_roi, templ, scales)
+            else:
+                score, best_scale, loc, size = self._best_match(search_roi, templ, scales)
             roi_center = self._center_norm(loc, size, search_roi.shape) if size != (0, 0) else None
             actual_center = self._roi_center_to_full(roi_center, origin, search_roi.shape, normalized.shape)
             shape_state = self._shape_result(score, threshold, cfg)
@@ -440,6 +481,7 @@ class ArtworkPresenceDetector:
                 f"actual=({ac[0]:.3f},{ac[1]:.3f}); expected=({ec[0]:.3f},{ec[1]:.3f}); "
                 f"pos_err={pos_error:.2f}; scale={best_scale:.2f}(ignored); "
                 f"label_align=YES score={label_score:.3f}; roi_origin=({origin[0]:.3f},{origin[1]:.3f}); "
+                f"detector={detector}; components={components if components is not None else {}}; "
                 f"{reason}; {elapsed:.1f}ms"
             )
             rows.append(FieldResult(

@@ -1,6 +1,6 @@
 {
   "profile_name": "Chassis Label",
-  "profile_version": "1.7.7",
+  "profile_version": "1.7.8",
   "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
   "fixed_fields": {
     "model": "GRG-4297u",
@@ -491,7 +491,12 @@
         "expected_center": [
           0.203,
           0.048
-        ]
+        ],
+        "detector": "comtrend_hybrid",
+        "search_roi_expand": 1.35,
+        "detector_note": "V1.7.8 COMTREND specialist: tighter Golden ROI + normalized grayscale/edge hybrid; size remains ignored.",
+        "shape_fail_threshold": 0.28,
+        "shape_verify_margin": 0.12
       },
       {
         "id": "recycling_mark",

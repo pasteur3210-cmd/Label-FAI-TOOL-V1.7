@@ -7,6 +7,7 @@ import json
 import logging
 import shutil
 import uuid
+import time
 
 import cv2
 import numpy as np
@@ -98,14 +99,15 @@ class MultiImageInspectionEngine:
             return "FAIL"
         return "NEED_MORE_IMAGE"
 
-    def _inspect_one(self, image_path: str, session_dir: Path, expected: dict, index: int):
+    def _inspect_one(self, image_path: str, session_dir: Path, expected: dict, index: int, target_items=None):
         per_root = session_dir / "per_image"
         per_root.mkdir(parents=True, exist_ok=True)
         one = self.base.inspect(image_path, str(per_root), expected)
         image = self._safe_load(image_path)
         art_rows = []
         if image is not None:
-            art_rows, _ = self.artwork.evaluate(image, requested_items=None)
+            art_requested=None if target_items is None else [x for x in target_items if str(x).startswith("Artwork: ")]
+            art_rows, _ = self.artwork.evaluate(image, requested_items=art_requested)
         rows = list(one.fields)
         existing = {r.name for r in rows}
         for r in art_rows:
@@ -118,6 +120,8 @@ class MultiImageInspectionEngine:
         quality_ok = bool(one.quality and one.quality.passed)
         obs = []
         for row in rows:
+            if target_items is not None and row.name not in target_items:
+                continue
             obs.append(ImageEvidence(
                 item=row.name,
                 result=self._classify_field(row, quality_ok),
@@ -151,7 +155,8 @@ class MultiImageInspectionEngine:
         return items
 
     def inspect_batch(self, image_paths: list[str], output_root="image_records", expected=None,
-                      previous_session: MultiImageResult | None = None) -> MultiImageResult:
+                      previous_session: MultiImageResult | None = None, progress_callback=None,
+                      cancel_event=None, target_items=None) -> MultiImageResult:
         if not image_paths:
             raise ValueError("No images selected")
         expected = dict(expected or {})
@@ -163,17 +168,26 @@ class MultiImageInspectionEngine:
         execution_log = session_dir / "execution.log"
         test_log = session_dir / "test.log"
         debug_log = session_dir / "debug.log"
+        performance_log = session_dir / "performance.log"
 
         def write(path: Path, text: str):
             with path.open("a", encoding="utf-8") as f:
                 f.write(f"{datetime.now().isoformat(timespec='milliseconds')} | {text}\n")
 
         result = previous_session or MultiImageResult(session_id=sid, session_dir=str(session_dir))
+        targets = None if target_items is None else set(target_items)
+        def progress(stage, index=0, total=0, image="", elapsed_ms=None, **extra):
+            if progress_callback:
+                try: progress_callback({"stage":stage,"index":index,"total":total,"image":image,"elapsed_ms":elapsed_ms,**extra})
+                except Exception: pass
+        def cancelled():
+            return bool(cancel_event is not None and getattr(cancel_event,"is_set",lambda:False)())
         if not previous_session:
             result.initial_image_count = len(image_paths)
         else:
             result.additional_image_count += len(image_paths)
-        write(execution_log, f"IMAGE_INSPECTION_START profile={self.profile.get('profile_name','')} add_count={len(image_paths)}")
+        write(execution_log, f"IMAGE_INSPECTION_START profile={self.profile.get('profile_name','')} add_count={len(image_paths)} targets={sorted(targets) if targets is not None else 'ALL'}")
+        progress("batch_start",0,len(image_paths),"")
 
         # Gather existing evidence/conflicts for incremental add-images flow.
         best = dict(result.evidence)
@@ -181,12 +195,27 @@ class MultiImageInspectionEngine:
         identity_sets = {k:set([v]) if v else set() for k,v in result.identity_values.items()}
 
         for idx, src in enumerate(image_paths, 1):
+            if cancelled():
+                write(execution_log, f"IMAGE_INSPECTION_CANCELLED before_index={idx}")
+                progress("cancelled",idx-1,len(image_paths),"")
+                raise RuntimeError("Image inspection cancelled by user")
+            image_started=time.perf_counter()
             src_path = Path(src)
+            progress("processing",idx,len(image_paths),src_path.name)
+            copy_started=time.perf_counter()
             dest = src_dir / f"{result.image_count + idx:02d}_{src_path.name}"
             if not dest.exists():
                 shutil.copy2(src_path, dest)
-            one, observations = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx)
+            copy_ms=(time.perf_counter()-copy_started)*1000.0
+            inspect_started=time.perf_counter()
+            if targets is None:
+                one, observations = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx)
+            else:
+                one, observations = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx, target_items=targets)
+            inspect_ms=(time.perf_counter()-inspect_started)*1000.0
             q = one.quality
+            total_ms=(time.perf_counter()-image_started)*1000.0
+            write(performance_log, f"IMAGE index={idx}/{len(image_paths)} file={src_path.name} copy_ms={copy_ms:.1f} inspect_ms={inspect_ms:.1f} total_ms={total_ms:.1f} target_count={len(targets) if targets is not None else 'ALL'}")
             write(debug_log, f"IMAGE file={src_path.name} overall={one.overall} quality_pass={bool(q and q.passed)} sharpness={getattr(q,'sharpness',0):.1f} errors={one.error_codes}")
 
             for ev in observations:
@@ -203,6 +232,7 @@ class MultiImageInspectionEngine:
                     continue
                 if self._better(ev, old):
                     best[ev.item] = ev
+            progress("image_done",idx,len(image_paths),src_path.name,elapsed_ms=total_ms)
 
         result.image_count += len(image_paths)
         result.evidence = best
@@ -238,8 +268,13 @@ class MultiImageInspectionEngine:
         write(test_log, f"RESULT overall={result.overall} images={result.image_count} identity={result.identity_status} unresolved={unresolved} conflicts={list(conflicts)} hard_fail={hard_fail}")
         write(execution_log, f"IMAGE_INSPECTION_END overall={result.overall} total_images={result.image_count}")
 
+        report_started=time.perf_counter()
+        progress("report",len(image_paths),len(image_paths),"")
         result.report_path = self._write_excel(result, expected)
         (session_dir / "result.json").write_text(json.dumps(self._serialize(result), ensure_ascii=False, indent=2), encoding="utf-8")
+        report_ms=(time.perf_counter()-report_started)*1000.0
+        write(performance_log,f"REPORT excel_json_ms={report_ms:.1f} overall={result.overall}")
+        progress("completed",len(image_paths),len(image_paths),"",elapsed_ms=report_ms)
         return result
 
     def _serialize(self, result: MultiImageResult):

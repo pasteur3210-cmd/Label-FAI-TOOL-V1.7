@@ -1,6 +1,6 @@
 {
   "profile_name": "Inner Box Label",
-  "profile_version": "1.7.7",
+  "profile_version": "1.7.8",
   "label_type": "Inner Box Label",
   "source_spec": "680010-353 GRG-4297u-TSL-P1 738125-00X Inner Box Label Request Form V3.0 (2025/11/03)",
   "model": "GRG-4297u",
@@ -85,7 +85,9 @@
         ],
         "shape_fail_threshold": 0.22,
         "shape_verify_margin": 0.08,
-        "detector_note": "V1.7.7 field-calibrated stable shape band from 2026-08-24 camera logs. Replay predicts 2 consecutive PASS around cycle 210-211 instead of cycle 304-305; Golden-relative position gate remains required; size remains ignored."
+        "detector_note": "V1.7.8 COMTREND specialist: tighter Golden ROI + normalized grayscale/edge hybrid; size remains ignored.",
+        "detector": "comtrend_hybrid",
+        "search_roi_expand": 1.35
       },
       {
         "id": "recycling_mark",
