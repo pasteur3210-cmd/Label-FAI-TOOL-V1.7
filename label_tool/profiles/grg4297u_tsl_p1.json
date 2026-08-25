@@ -1,6 +1,6 @@
 {
   "profile_name": "Chassis Label",
-  "profile_version": "1.8.2",
+  "profile_version": "1.9.0",
   "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
   "fixed_fields": {
     "model": "GRG-4297u",
@@ -625,5 +625,6 @@
     "session_rule_refusion": true,
     "artwork_position_source": "full_label_overview",
     "artwork_shape_closeup_allowed": true
-  }
+  },
+  "profile_status": "BUNDLED_VALIDATED"
 }

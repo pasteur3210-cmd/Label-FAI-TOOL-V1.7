@@ -1,7 +1,8 @@
 from __future__ import annotations
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import logging
+import json
 import threading
 import queue
 import os
@@ -17,6 +18,7 @@ from . import __version__
 from .core.engine import InspectionEngine
 from .core.multi_image_inspection import MultiImageInspectionEngine
 from .core.profile_manager import discover_profiles
+from .core.golden_profile_manager import build_dynamic_profile, validate_profile_structure, mark_validated
 from .core.camera_manager import CameraManager
 from .core.live_engine import LiveFrameAnalyzer, LOCK_TO_FIELD
 from .core.smart_lock import SmartLockEngine, IdentityGuard
@@ -123,6 +125,104 @@ class App(tk.Tk):
             self._apply_profile()
         self.worker_poll_job = self.after(self.worker_poll_interval_ms, self._poll_worker_results)
 
+    def _import_golden_profile(self):
+        if not self.profiles:
+            messagebox.showerror("Import Golden","No baseline profile is available.")
+            return
+        source=filedialog.askopenfilename(
+            title="Import Golden DOC / DOCX / Image",
+            filetypes=[("Golden files","*.doc *.docx *.png *.jpg *.jpeg *.bmp *.webp"),("All files","*.*")])
+        if not source:
+            return
+        base_name=self.profile_var.get() or next(iter(self.profiles))
+        low_name=os.path.basename(source).lower()
+        if 'inner' in low_name:
+            for candidate in self.profiles:
+                if 'inner' in candidate.lower():
+                    base_name=candidate; break
+        elif 'chassis' in low_name:
+            for candidate in self.profiles:
+                if 'chassis' in candidate.lower():
+                    base_name=candidate; break
+        base=self.profiles[base_name][1]
+        suggested=f"{base.get('model','New Model')} Dynamic Label"
+        name=simpledialog.askstring("New Golden Profile","Profile name (can be changed later):",initialvalue=suggested,parent=self)
+        if not name:
+            return
+        try:
+            path,profile=build_dynamic_profile(source,base,name.strip())
+            self._load_profiles()
+            self.profile_combo['values']=list(self.profiles.keys())
+            self.profile_var.set(profile['profile_name'])
+            self._apply_profile()
+            log.info("GOLDEN_IMPORT profile=%s file=%s sha256=%s",profile['profile_name'],source,profile.get('golden_import',{}).get('source_sha256',''))
+            messagebox.showinfo("Golden Imported",
+                f"Draft profile created:\n{path.name}\n\nExtracted fixed-text candidates: {len(profile.get('dynamic_fixed_texts',[]))}\n"
+                f"Embedded images: {profile.get('golden_import',{}).get('embedded_image_count',0)}\n\n"
+                "Please review Profile Manager, then Validate Profile before production use.")
+            self._open_profile_manager()
+        except Exception as exc:
+            log.exception("GOLDEN_IMPORT_ERROR")
+            messagebox.showerror("Import Golden",str(exc))
+
+    def _open_profile_manager(self):
+        name=self.profile_var.get()
+        if not name or name not in self.profiles:
+            messagebox.showinfo("Profile Manager","Select a profile first.")
+            return
+        path,data=self.profiles[name]
+        win=tk.Toplevel(self); win.title(f"Profile Manager - {name}"); win.geometry("1100x760")
+        hdr=ttk.Frame(win,padding=8); hdr.pack(fill='x')
+        status=str(data.get('profile_status','BUNDLED')).upper()
+        ttk.Label(hdr,text=f"File: {path} | Status: {status}",font=("Segoe UI",10,"bold")).pack(side='left')
+        text=tk.Text(win,wrap='none',font=('Consolas',9),undo=True)
+        y=ttk.Scrollbar(win,orient='vertical',command=text.yview); x=ttk.Scrollbar(win,orient='horizontal',command=text.xview)
+        text.configure(yscrollcommand=y.set,xscrollcommand=x.set)
+        text.pack(side='left',fill='both',expand=True,padx=(8,0),pady=(0,8)); y.pack(side='right',fill='y',pady=(0,8)); x.pack(side='bottom',fill='x',padx=8)
+        text.insert('1.0',json.dumps(data,ensure_ascii=False,indent=2))
+        btns=ttk.Frame(hdr); btns.pack(side='right')
+        def save_json():
+            try:
+                new=json.loads(text.get('1.0','end-1c'))
+                errs=validate_profile_structure(new)
+                if errs and not messagebox.askyesno("Profile Validation", "Warnings found:\n- " + "\n- ".join(errs) + "\n\nSave as DRAFT anyway?",parent=win):
+                    return
+                if errs: new['profile_status']='DRAFT'
+                path.write_text(json.dumps(new,ensure_ascii=False,indent=2),encoding='utf-8')
+                self._load_profiles(); self.profile_combo['values']=list(self.profiles.keys())
+                self.profile_var.set(new.get('profile_name',name)); self._apply_profile()
+                messagebox.showinfo("Profile Manager","Profile saved. Cache will be invalidated automatically by profile content hash.",parent=win)
+            except Exception as exc:
+                messagebox.showerror("Profile Manager",str(exc),parent=win)
+        ttk.Button(btns,text='Save Profile',command=save_json).pack(side='left',padx=3)
+        ttk.Button(btns,text='Close',command=win.destroy).pack(side='left',padx=3)
+
+    def _validate_current_profile(self):
+        name=self.profile_var.get()
+        if not name or name not in self.profiles:
+            messagebox.showinfo("Validate Profile","Select a profile first.")
+            return
+        path,data=self.profiles[name]
+        errors=validate_profile_structure(data)
+        if errors:
+            messagebox.showerror("Validate Profile","Profile cannot be validated:\n- " + "\n- ".join(errors))
+            return
+        if not data.get('dynamic_profile'):
+            messagebox.showinfo("Validate Profile","This is a bundled engineering profile. No status change is required.")
+            return
+        if not messagebox.askyesno("Validate Profile",
+            "Structural checks passed.\n\nMark this Golden Profile as VALIDATED?\n"
+            "Only do this after checking the extracted items / thresholds and testing known-good label photos."):
+            return
+        try:
+            updated=mark_validated(path,data)
+            self._load_profiles(); self.profile_combo['values']=list(self.profiles.keys())
+            self.profile_var.set(updated['profile_name']); self._apply_profile()
+            log.info("PROFILE_VALIDATED profile=%s file=%s",updated['profile_name'],path)
+            messagebox.showinfo("Validate Profile","Profile status = VALIDATED")
+        except Exception as exc:
+            messagebox.showerror("Validate Profile",str(exc))
+
     def _load_profiles(self):
         self.profiles = {name:(path,data) for name,path,data in discover_profiles()}
 
@@ -134,6 +234,9 @@ class App(tk.Tk):
         self.profile_combo.grid(row=0,column=1,padx=5,sticky="w")
         self.profile_combo.bind("<<ComboboxSelected>>", lambda e:self._apply_profile())
         ttk.Button(prof,text="Reload Profiles",command=self._reload_profiles).grid(row=0,column=2,padx=5)
+        ttk.Button(prof,text="Import Golden",command=self._import_golden_profile).grid(row=0,column=3,padx=5)
+        ttk.Button(prof,text="Profile Manager",command=self._open_profile_manager).grid(row=0,column=4,padx=5)
+        ttk.Button(prof,text="Validate Profile",command=self._validate_current_profile).grid(row=0,column=5,padx=5)
         ttk.Label(prof,textvariable=self.profile_info_var).grid(row=1,column=0,columnspan=8,sticky="w",pady=(5,0))
 
         wo = ttk.LabelFrame(self, text="Optional Work Order Data", padding=8)
@@ -246,7 +349,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.8.2 incremental mode: previously analyzed photos use cache; only new/unresolved evidence is analyzed. Use Force Re-analyze All only for engineering verification.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.0 Dynamic Golden Profile + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -321,7 +424,7 @@ class App(tk.Tk):
         self.profile_info_var.set(
             f"Model: {data.get('model','')} | Label Type: {data.get('label_type','Chassis Label')} | "
             f"Label P/N: {data.get('label_pn','')} | Spec: {data.get('spec_version','')} | "
-            f"Profile Ver: {data.get('profile_version','')} | File: {path.name}"
+            f"Profile Ver: {data.get('profile_version','')} | Status: {data.get('profile_status','BUNDLED')} | File: {path.name}"
         )
         self._reset_live_tree()
         self._update_zone_ui()
@@ -1801,7 +1904,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.8.2 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.0 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

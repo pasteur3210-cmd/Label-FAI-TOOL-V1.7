@@ -9,6 +9,7 @@ import shutil
 import uuid
 import time
 import hashlib
+import re
 
 import cv2
 import numpy as np
@@ -357,6 +358,13 @@ class MultiImageInspectionEngine:
         return result
 
     def _role_items(self):
+        configured=(self.profile.get("image_inspection",{}) or {}).get("role_items")
+        if isinstance(configured,dict) and configured:
+            out={}
+            for role,items in configured.items():
+                out[str(role).upper()]={str(x) for x in (items or [])}
+            # DETAIL is a legitimate generic role in V1.9.0 dynamic profiles.
+            return out
         label_type = str(self.profile.get("label_type", self.profile.get("profile_name", ""))).lower()
         return ROLE_ITEMS_INNER if "inner" in label_type else ROLE_ITEMS_CHASSIS
 
@@ -511,6 +519,47 @@ class MultiImageInspectionEngine:
             return True
         return item in self._role_items().get(role, set())
 
+    def _dynamic_rows(self, raw_text: str):
+        """Evaluate Golden-driven fixed text / regex fields without source-code rules.
+
+        These rows are deliberately profile-only: a new label may add, remove or
+        change them by editing its external JSON profile.
+        """
+        rows=[]
+        for cfg in self.profile.get("dynamic_fixed_texts",[]) or []:
+            item=str(cfg.get("item") or f"Golden Text: {cfg.get('name','Text')}")
+            expected=str(cfg.get("text","") or "")
+            threshold=float(cfg.get("threshold",0.74) or 0.74)
+            score,best=best_line_similarity(raw_text or "",expected)
+            if score >= threshold:
+                rows.append(FieldResult(name=item,actual=best or "Present",expected=expected,status="PASS",
+                    message=f"Dynamic Golden text similarity={score:.3f} threshold={threshold:.3f}",error_code=""))
+            elif best:
+                rows.append(FieldResult(name=item,actual=best,expected=expected,status="WARN",
+                    message=f"Dynamic Golden text needs clearer image similarity={score:.3f} threshold={threshold:.3f}",error_code="DYN-TEXT-VERIFY"))
+            else:
+                rows.append(FieldResult(name=item,actual="",expected=expected,status="WARN",
+                    message="Dynamic Golden text not recognized",error_code="DYN-TEXT-MISSING"))
+        compact=' '.join((raw_text or '').split())
+        for cfg in self.profile.get("dynamic_variable_fields",[]) or []:
+            item=str(cfg.get("item") or f"Dynamic: {cfg.get('name','Field')}")
+            regex=str(cfg.get("regex","") or "")
+            display=str(cfg.get("display",regex) or regex)
+            actual=""
+            if regex:
+                try:
+                    m=re.search(regex,compact,re.I)
+                    if m: actual=m.group(1) if m.lastindex else m.group(0)
+                except re.error:
+                    pass
+            if actual:
+                rows.append(FieldResult(name=item,actual=actual,expected=display,status="PASS",
+                    message="Dynamic Golden regex field matched",error_code=""))
+            else:
+                rows.append(FieldResult(name=item,actual="",expected=display,status="WARN",
+                    message="Dynamic Golden regex field not recognized",error_code="DYN-FIELD-MISSING"))
+        return rows
+
     def _inspect_one(self, image_path: str, session_dir: Path, expected: dict, index: int, target_items=None):
         per_root = session_dir / "per_image"
         per_root.mkdir(parents=True, exist_ok=True)
@@ -529,6 +578,7 @@ class MultiImageInspectionEngine:
         qscore = self._direct_quality_score(image)
         direct_quality_ok = self._sharpness(image) >= 18.0 and self._contrast(image) >= 8.0
         direct_rows = validate(direct_fields, self.profile, expected_work_order=expected or {})
+        direct_rows.extend(self._dynamic_rows(raw_text))
 
         if role == "FULL":
             # The overview still uses the established whole-label engine because
@@ -558,7 +608,8 @@ class MultiImageInspectionEngine:
         # Original-photo OCR/decoder evidence is allowed to rescue a weak legacy
         # full-label correction and is the primary evidence for detail roles.
         for r in direct_rows:
-            if self._role_allows(role, r.name):
+            dynamic_item = r.name.startswith("Golden Text: ") or r.name.startswith("Dynamic: ")
+            if self._role_allows(role, r.name) or dynamic_item:
                 old = rows_by_name.get(r.name)
                 if old is None or r.status == "PASS" or old.status != "PASS":
                     rows_by_name[r.name] = r
