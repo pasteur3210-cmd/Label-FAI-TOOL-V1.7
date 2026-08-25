@@ -411,27 +411,33 @@ class MultiImageInspectionEngine:
                     items.append(item)
         return items
 
-    def _visual_compliance_override(self, image, role: str) -> str:
-        """Use compliance-symbol shapes to rescue a misclassified close-up.
+    def _visual_compliance_override_cached(self, image, role: str):
+        """Return ``(role, cached_shape_detections, requested_items)``.
 
-        A compliance close-up may also contain one GPON barcode and can be
-        incorrectly classified as IDENTITY when OCR misses the small words.
-        Two independently detected compliance symbols are strong evidence that
-        the photo is the Compliance / Artwork view.
+        V1.8.0 used the compliance artwork detector once to classify a close-up
+        and then immediately ran the same detector a second time to collect
+        shape evidence.  On production phone photos that duplicate pass can
+        cost many seconds.  V1.8.1 keeps the exact decision rule but reuses the
+        first detector output.
         """
         if role in ("FULL", "COMPLIANCE"):
-            return role
+            return role, None, []
         req = [x for x in self._role_items().get("COMPLIANCE", set()) if str(x).startswith("Artwork: ")]
         if not req:
-            return role
+            return role, None, []
         try:
             _rows, dets = self.artwork.evaluate_shape_only(image, requested_items=req)
             passes = [d for d in dets if getattr(d, "shape_state", "") == "PASS"]
             if len(passes) >= 2:
-                return "COMPLIANCE"
+                return "COMPLIANCE", dets, req
+            return role, dets, req
         except Exception as exc:
             log.debug("MULTI_IMAGE_ROLE_VISUAL_OVERRIDE_ERROR %s", exc)
-        return role
+            return role, None, req
+
+    def _visual_compliance_override(self, image, role: str) -> str:
+        # Backward-compatible wrapper retained for tests/plugins.
+        return self._visual_compliance_override_cached(image, role)[0]
 
     @staticmethod
     def _force_fact(result: MultiImageResult, key: str, value, source: str, quality: float, reason: str = ""):
@@ -475,7 +481,7 @@ class MultiImageInspectionEngine:
         direct_fields, raw_text, decoded_texts, _decoded = self._direct_original_facts(image)
         total = int(getattr(self, "_batch_total", index) or index)
         role = self.classify_photo_role(direct_fields, decoded_texts, raw_text, index, total)
-        role = self._visual_compliance_override(image, role)
+        role, compliance_shape_cache, compliance_shape_req = self._visual_compliance_override_cached(image, role)
         qscore = self._direct_quality_score(image)
         direct_quality_ok = self._sharpness(image) >= 18.0 and self._contrast(image) >= 8.0
         direct_rows = validate(direct_fields, self.profile, expected_work_order=expected or {})
@@ -540,7 +546,14 @@ class MultiImageInspectionEngine:
             allowed = self._role_items().get(role, set()) if role != "DETAIL" else set(self._required_items())
             req = [x for x in (art_requested if art_requested is not None else allowed) if str(x).startswith("Artwork: ")]
             if req:
-                _shape_rows, shape_dets = self.artwork.evaluate_shape_only(image, requested_items=req)
+                # Reuse the visual-role detector result when it evaluated the
+                # same compliance artwork set. This preserves thresholds and
+                # scoring while removing a duplicate expensive image pass.
+                if (compliance_shape_cache is not None and role == "COMPLIANCE"
+                        and set(req).issubset(set(compliance_shape_req or []))):
+                    shape_dets = [d for d in compliance_shape_cache if getattr(d, "item", None) in set(req)]
+                else:
+                    _shape_rows, shape_dets = self.artwork.evaluate_shape_only(image, requested_items=req)
                 for d in shape_dets:
                     art_shape[d.item] = {
                         "shape_state": d.shape_state,

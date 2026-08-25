@@ -1,4 +1,14 @@
-# Label Auto Inspection Tool V1.8.0
+# Label Auto Inspection Tool V1.8.1
+
+## V1.8.1 - Performance & Manual Review UI Optimization
+
+- Manual Review panel is now fixed above the expandable Image Inspection result table so operator PASS controls remain visible on shorter screens.
+- Added vertical scrolling to the Manual Review list and both vertical/horizontal scrolling to the Image Inspection result table.
+- Removed duplicate Compliance/Artwork shape evaluation during multi-image photo-role rescue by reusing the first detector result. The scoring/threshold logic is unchanged.
+- Kept V1.8.0 manual PASS restrictions: identity, barcode and consistency checks cannot be overridden.
+- Removed duplicate REPORT performance-log entry.
+- Regression validation: 200 tests expected after V1.8.1 additions.
+
 
 ## V1.8.0 main changes
 - Image Label Inspection now follows a guided five-photo evidence plan: Full Label + Basic/Logo + WiFi/User + Identity/Barcode + Compliance/Artwork.

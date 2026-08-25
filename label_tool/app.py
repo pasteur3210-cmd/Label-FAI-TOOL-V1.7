@@ -251,25 +251,46 @@ class App(tk.Tk):
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
         self.image_preview=ttk.Label(left,anchor="center",relief="sunken",text="Load one or more label photos"); self.image_preview.pack(fill="both",expand=True)
         self.image_overall=tk.Label(right,text="--",font=("Segoe UI",26,"bold")); self.image_overall.pack(fill="x")
-        cols=("item","result","actual","expected","source","quality","message")
-        self.image_tree=ttk.Treeview(right,columns=cols,show="headings",height=28)
-        widths={"item":270,"result":120,"actual":190,"expected":210,"source":190,"quality":90,"message":320}
-        for c in cols:
-            self.image_tree.heading(c,text=c.title()); self.image_tree.column(c,width=widths[c],anchor="w")
-        self.image_tree.pack(fill="both",expand=True)
 
+        # V1.8.1 UI: keep Manual Review above the expandable result table.
+        # On shorter screens the old layout let the Treeview consume the
+        # available height first, pushing the review controls below the visible
+        # area.  Packing this fixed-height operator panel first guarantees that
+        # PASS/refresh controls remain reachable at all supported resolutions.
         manual=ttk.LabelFrame(right,text="Manual Review / 人工目檢輔助",padding=6)
-        manual.pack(fill="x",pady=(6,0))
-        ttk.Label(manual,text="Select unresolved visual items, then confirm by visual inspection. Identity/barcode/consistency items cannot be overridden.").grid(row=0,column=0,columnspan=4,sticky="w")
-        self.image_manual_list=tk.Listbox(manual,selectmode="extended",height=4,exportselection=False)
-        self.image_manual_list.grid(row=1,column=0,columnspan=4,sticky="ew",pady=4)
+        manual.pack(fill="x",pady=(2,6))
+        ttk.Label(manual,text="Select unresolved visual items, then confirm by visual inspection. Identity/barcode/consistency items cannot be overridden.",wraplength=980).grid(row=0,column=0,columnspan=5,sticky="w")
+        list_frame=ttk.Frame(manual)
+        list_frame.grid(row=1,column=0,columnspan=5,sticky="ew",pady=4)
+        self.image_manual_list=tk.Listbox(list_frame,selectmode="extended",height=3,exportselection=False)
+        manual_scroll=ttk.Scrollbar(list_frame,orient="vertical",command=self.image_manual_list.yview)
+        self.image_manual_list.configure(yscrollcommand=manual_scroll.set)
+        self.image_manual_list.pack(side="left",fill="x",expand=True)
+        manual_scroll.pack(side="right",fill="y")
         ttk.Label(manual,text="Note:").grid(row=2,column=0,sticky="w")
-        ttk.Entry(manual,textvariable=self.image_manual_note_var,width=52).grid(row=2,column=1,sticky="ew",padx=4)
+        ttk.Entry(manual,textvariable=self.image_manual_note_var,width=44).grid(row=2,column=1,sticky="ew",padx=4)
         self.image_manual_pass_btn=ttk.Button(manual,text="Confirm Selected as PASS",command=self.manual_review_selected,state="disabled")
         self.image_manual_pass_btn.grid(row=2,column=2,padx=4)
         self.image_manual_refresh_btn=ttk.Button(manual,text="Refresh Review List",command=self._refresh_manual_review_list,state="disabled")
         self.image_manual_refresh_btn.grid(row=2,column=3,padx=4)
+        ttk.Label(manual,text="Manual PASS is logged",foreground="#555555").grid(row=2,column=4,sticky="e",padx=(8,0))
         manual.columnconfigure(1,weight=1)
+        list_frame.columnconfigure(0,weight=1)
+
+        results=ttk.Frame(right)
+        results.pack(fill="both",expand=True)
+        cols=("item","result","actual","expected","source","quality","message")
+        self.image_tree=ttk.Treeview(results,columns=cols,show="headings",height=18)
+        widths={"item":270,"result":120,"actual":190,"expected":210,"source":190,"quality":90,"message":320}
+        for c in cols:
+            self.image_tree.heading(c,text=c.title()); self.image_tree.column(c,width=widths[c],anchor="w")
+        tree_y=ttk.Scrollbar(results,orient="vertical",command=self.image_tree.yview)
+        tree_x=ttk.Scrollbar(results,orient="horizontal",command=self.image_tree.xview)
+        self.image_tree.configure(yscrollcommand=tree_y.set,xscrollcommand=tree_x.set)
+        self.image_tree.grid(row=0,column=0,sticky="nsew")
+        tree_y.grid(row=0,column=1,sticky="ns")
+        tree_x.grid(row=1,column=0,sticky="ew")
+        results.rowconfigure(0,weight=1); results.columnconfigure(0,weight=1)
 
     def _reload_profiles(self):
         cur=self.profile_var.get(); self._load_profiles(); self.profile_combo['values']=list(self.profiles.keys())
