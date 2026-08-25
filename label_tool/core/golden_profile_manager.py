@@ -33,11 +33,17 @@ def _doc_to_docx(path: Path) -> Path:
     if os.name != 'nt':
         raise RuntimeError('Legacy .doc import requires Windows + Microsoft Word. Convert the file to .docx first on this computer.')
     out = Path(tempfile.gettempdir()) / f'label_golden_{path.stem}_{os.getpid()}.docx'
+    # Keep this Python 3.11-compatible: do not place quote-heavy string
+    # operations directly inside an f-string expression (PEP 701 syntax is
+    # only accepted by Python 3.12+). Escape PowerShell single-quoted string
+    # literals before composing the command.
+    source_ps = "'" + str(path).replace("'", "''") + "'"
+    output_ps = "'" + str(out).replace("'", "''") + "'"
     ps = (
         "$ErrorActionPreference='Stop'; "
         "$w=New-Object -ComObject Word.Application; $w.Visible=$false; "
-        f"$d=$w.Documents.Open('{str(path).replace("'", "''")}'); "
-        f"$d.SaveAs2('{str(out).replace("'", "''")}',16); "
+        f"$d=$w.Documents.Open({source_ps}); "
+        f"$d.SaveAs2({output_ps},16); "
         "$d.Close(); $w.Quit();"
     )
     cp = subprocess.run(['powershell','-NoProfile','-ExecutionPolicy','Bypass','-Command',ps], capture_output=True, text=True, timeout=90)
