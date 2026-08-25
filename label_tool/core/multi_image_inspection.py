@@ -8,6 +8,7 @@ import logging
 import shutil
 import uuid
 import time
+import hashlib
 
 import cv2
 import numpy as np
@@ -121,6 +122,9 @@ class MultiImageResult:
     manual_overrides: dict = field(default_factory=dict)
     automatic_overall: str = ""
     expected_work_order: dict = field(default_factory=dict)
+    processed_images: list[dict] = field(default_factory=list)
+    cache_context: str = ""
+    cache_hits: int = 0
 
 
 class MultiImageInspectionEngine:
@@ -149,6 +153,46 @@ class MultiImageInspectionEngine:
         self.profile = profile
         self.base.set_profile(profile)
         self.artwork.set_profile(profile)
+
+    @staticmethod
+    def _stable_hash(payload) -> str:
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    def _cache_context(self, expected: dict) -> str:
+        """Fingerprint all inputs that can change an inspection decision.
+
+        A previous session is reusable only while profile, work-order expectations
+        and software version are unchanged.  This prevents stale evidence from a
+        different Golden/Profile or rule set being silently reused.
+        """
+        return self._stable_hash({
+            "profile": self.profile,
+            "expected": dict(expected or {}),
+            "software_version": self.software_version,
+        })
+
+    @staticmethod
+    def _file_fingerprint(path: str) -> dict:
+        p = Path(path)
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        st = p.stat()
+        return {
+            "sha256": h.hexdigest(),
+            "source_path": str(p.resolve()),
+            "source_name": p.name,
+            "size": int(st.st_size),
+            "mtime_ns": int(st.st_mtime_ns),
+        }
+
+    @staticmethod
+    def _processed_hashes(result: MultiImageResult | None) -> set[str]:
+        if result is None:
+            return set()
+        return {str(x.get("sha256", "")) for x in (result.processed_images or []) if x.get("sha256")}
 
     @staticmethod
     def _safe_load(path: str):
@@ -699,6 +743,11 @@ class MultiImageInspectionEngine:
         result.expected_work_order = dict(expected or result.expected_work_order or {})
         targets = None if target_items is None else set(target_items)
 
+        current_context = self._cache_context(expected)
+        if previous_session and result.cache_context and result.cache_context != current_context:
+            raise ValueError("Inspection cache context changed (Profile/Golden/work-order/software). Reset the image session and run again.")
+        result.cache_context = current_context
+
         def progress(stage, index=0, total=0, image="", elapsed_ms=None, **extra):
             if progress_callback:
                 try:
@@ -710,33 +759,66 @@ class MultiImageInspectionEngine:
         def cancelled():
             return bool(cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)())
 
+        # V1.8.2 incremental preflight: fingerprint every selected path first,
+        # then analyze only content not already present in this session. Hashing
+        # a file is orders of magnitude cheaper than OCR/artwork processing and
+        # also prevents the same image being analyzed twice under a new filename.
+        already = self._processed_hashes(result)
+        queued = []
+        seen_now = set()
+        for src in image_paths:
+            fp = self._file_fingerprint(str(src))
+            digest = fp["sha256"]
+            if digest in already or digest in seen_now:
+                result.cache_hits += 1
+                write(performance_log, f"CACHE_HIT file={Path(src).name} sha256={digest[:16]} action=SKIP_OCR")
+                progress("cache_hit", 0, len(image_paths), Path(src).name, elapsed_ms=0.0)
+                continue
+            seen_now.add(digest)
+            queued.append((str(src), fp))
+
+        new_count = len(queued)
         if not previous_session:
-            result.initial_image_count = len(image_paths)
+            result.initial_image_count = new_count
         else:
-            result.additional_image_count += len(image_paths)
-        write(execution_log, f"IMAGE_INSPECTION_START profile={self.profile.get('profile_name','')} add_count={len(image_paths)} targets={sorted(targets) if targets is not None else 'ALL'}")
-        write(execution_log, "CAPTURE_PLAN recommended=FULL+BASIC+WIFI+IDENTITY+COMPLIANCE auto_classification=ON")
-        progress("batch_start", 0, len(image_paths), "")
+            result.additional_image_count += new_count
+        write(execution_log, f"IMAGE_INSPECTION_START profile={self.profile.get('profile_name','')} selected_count={len(image_paths)} new_count={new_count} cache_hits={len(image_paths)-new_count} targets={sorted(targets) if targets is not None else 'ALL'}")
+        write(execution_log, "CAPTURE_PLAN recommended=FULL+BASIC+WIFI+IDENTITY+COMPLIANCE auto_classification=ON incremental_cache=ON")
+        progress("batch_start", 0, new_count, "")
 
         best = dict(result.evidence)
         conflicts = {k: list(v) for k, v in result.conflicts.items()}
         identity_sets = {k: set([v]) if v else set() for k, v in result.identity_values.items()}
 
-        for idx, src in enumerate(image_paths, 1):
+        # Early PASS: when there is no unresolved/conflicting target, selected
+        # already-processed photos are true cache hits and no OCR work is needed.
+        # New unique photos are still analyzed unless caller explicitly targets
+        # an empty set (used by the UI after a completed PASS).
+        if previous_session and targets is not None and not targets and new_count:
+            for src, fp in queued:
+                result.processed_images.append({**fp, "role": "SKIPPED_AFTER_PASS", "processed_at": datetime.now().isoformat(timespec="seconds")})
+                result.photo_roles[Path(src).name] = "SKIPPED_AFTER_PASS"
+                write(performance_log, f"EARLY_PASS file={Path(src).name} sha256={fp['sha256'][:16]} action=SKIP_ANALYSIS")
+            result.image_count += new_count
+            result.additional_image_count += 0  # already accounted above
+            queued = []
+            new_count = 0
+
+        for idx, (src, fingerprint) in enumerate(queued, 1):
             if cancelled():
                 write(execution_log, f"IMAGE_INSPECTION_CANCELLED before_index={idx}")
                 progress("cancelled", idx-1, len(image_paths), "")
                 raise RuntimeError("Image inspection cancelled by user")
             image_started = time.perf_counter()
             src_path = Path(src)
-            progress("processing", idx, len(image_paths), src_path.name)
+            progress("processing", idx, len(queued), src_path.name)
             copy_started = time.perf_counter()
             dest = src_dir / f"{result.image_count + idx:02d}_{src_path.name}"
             if not dest.exists():
                 shutil.copy2(src_path, dest)
             copy_ms = (time.perf_counter()-copy_started)*1000.0
             inspect_started = time.perf_counter()
-            self._batch_total = result.image_count + len(image_paths)
+            self._batch_total = result.image_count + len(queued)
             try:
                 one_result = self._inspect_one(str(src_path), session_dir, expected, result.image_count + idx, target_items=targets)
             except TypeError as exc:
@@ -758,7 +840,7 @@ class MultiImageInspectionEngine:
             inspect_ms = (time.perf_counter()-inspect_started)*1000.0
             total_ms = (time.perf_counter()-image_started)*1000.0
             result.photo_roles[src_path.name] = role
-            write(performance_log, f"IMAGE index={idx}/{len(image_paths)} role={role} file={src_path.name} copy_ms={copy_ms:.1f} inspect_ms={inspect_ms:.1f} total_ms={total_ms:.1f} target_count={len(targets) if targets is not None else 'ALL'}")
+            write(performance_log, f"IMAGE index={idx}/{len(queued)} role={role} file={src_path.name} copy_ms={copy_ms:.1f} inspect_ms={inspect_ms:.1f} total_ms={total_ms:.1f} target_count={len(targets) if targets is not None else 'ALL'}")
             write(debug_log, f"IMAGE file={src_path.name} role={role} base_overall={one.overall} direct_sharpness={diag.get('sharpness',0):.1f} direct_contrast={diag.get('contrast',0):.1f} direct_q={diag.get('quality',0):.3f} decoded={diag.get('decoded_texts',[])}")
 
             for key, value in raw_fields.items():
@@ -790,9 +872,10 @@ class MultiImageInspectionEngine:
                     continue
                 if self._better(ev, old):
                     best[ev.item] = ev
-            progress("image_done", idx, len(image_paths), f"{src_path.name} [{ROLE_LABELS.get(role,role)}]", elapsed_ms=total_ms)
+            result.processed_images.append({**fingerprint, "role": role, "processed_at": datetime.now().isoformat(timespec="seconds")})
+            progress("image_done", idx, len(queued), f"{src_path.name} [{ROLE_LABELS.get(role,role)}]", elapsed_ms=total_ms)
 
-        result.image_count += len(image_paths)
+        result.image_count += len(queued)
 
         # Cross-photo fusion: rerun all data/relationship rules from the best raw
         # facts gathered across the photo set, then combine close-up artwork shape
@@ -818,30 +901,65 @@ class MultiImageInspectionEngine:
                 hard_fail.append(item)
         result.unresolved_items = unresolved
 
-        if not result.automatic_overall:
-            result.automatic_overall = "PENDING"
-        if result.identity_status == "MISMATCH":
-            result.overall = "IDENTITY_MISMATCH"
-        elif conflicts:
-            result.overall = "CONFLICT"
-        elif hard_fail:
-            result.overall = "FAIL"
-        elif unresolved:
-            result.overall = "NEED_MORE_IMAGE"
-        else:
-            result.overall = "PASS"
+        # Reconstruct the pure machine decision separately from the final
+        # operator decision. Manual overrides store their original auto_result,
+        # so a later incremental run must not rewrite Automatic Overall to PASS.
+        auto_unresolved, auto_hard_fail, auto_conflict = [], [], False
+        for item in required:
+            manual = result.manual_overrides.get(item)
+            if manual:
+                state = str(manual.get("auto_result", "NEED_MORE_IMAGE")).upper()
+                if state == "CONFLICT":
+                    auto_conflict = True
+                elif state == "FAIL":
+                    auto_hard_fail.append(item)
+                elif state in ("NEED_MORE_IMAGE", "ERROR", "VERIFY", "WARN", "INFO", "SKIP"):
+                    auto_unresolved.append(item)
+                continue
+            if item in conflicts:
+                auto_conflict = True
+                continue
+            ev = best.get(item)
+            if ev is None or ev.result in ("NEED_MORE_IMAGE", "ERROR"):
+                auto_unresolved.append(item)
+            elif ev.result == "FAIL":
+                auto_hard_fail.append(item)
 
-        result.automatic_overall = result.overall
+        if result.identity_status == "MISMATCH":
+            automatic = "IDENTITY_MISMATCH"
+        elif auto_conflict:
+            automatic = "CONFLICT"
+        elif auto_hard_fail:
+            automatic = "FAIL"
+        elif auto_unresolved:
+            automatic = "NEED_MORE_IMAGE"
+        else:
+            automatic = "PASS"
+        result.automatic_overall = automatic
+
+        if result.identity_status == "MISMATCH":
+            final_overall = "IDENTITY_MISMATCH"
+        elif conflicts:
+            final_overall = "CONFLICT"
+        elif hard_fail:
+            final_overall = "FAIL"
+        elif unresolved:
+            final_overall = "NEED_MORE_IMAGE"
+        elif result.manual_overrides:
+            final_overall = "PASS_WITH_MANUAL_REVIEW"
+        else:
+            final_overall = "PASS"
+        result.overall = final_overall
         write(test_log, f"RESULT overall={result.overall} images={result.image_count} identity={result.identity_status} roles={result.photo_roles} unresolved={unresolved} conflicts={list(conflicts)} hard_fail={hard_fail}")
         write(execution_log, f"IMAGE_INSPECTION_END overall={result.overall} total_images={result.image_count} roles={result.photo_roles}")
 
         report_started = time.perf_counter()
-        progress("report", len(image_paths), len(image_paths), "")
+        progress("report", len(queued), len(queued), "")
         result.report_path = self._write_excel(result, expected)
         (session_dir / "result.json").write_text(json.dumps(self._serialize(result), ensure_ascii=False, indent=2), encoding="utf-8")
         report_ms = (time.perf_counter()-report_started)*1000.0
         write(performance_log, f"REPORT excel_json_ms={report_ms:.1f} overall={result.overall}")
-        progress("completed", len(image_paths), len(image_paths), "", elapsed_ms=report_ms)
+        progress("completed", len(queued), len(queued), "", elapsed_ms=report_ms)
         return result
 
     def _serialize(self, result: MultiImageResult):
@@ -862,6 +980,9 @@ class MultiImageInspectionEngine:
             "automatic_overall": result.automatic_overall,
             "manual_overrides": result.manual_overrides,
             "expected_work_order": result.expected_work_order,
+            "processed_images": result.processed_images,
+            "cache_context": result.cache_context,
+            "cache_hits": result.cache_hits,
             "evidence": {k: asdict(v) for k, v in result.evidence.items()},
             "conflicts": {k: [asdict(x) for x in v] for k, v in result.conflicts.items()},
             "report_path": result.report_path,
@@ -883,7 +1004,7 @@ class MultiImageInspectionEngine:
             ("Profile", self.profile.get("profile_name", "")), ("Label Type", self.profile.get("label_type", "")),
             ("Software Version", self.software_version), ("Session ID", result.session_id),
             ("Images Loaded", result.image_count), ("Initial Batch", result.initial_image_count),
-            ("Additional Images", result.additional_image_count), ("Identity Check", result.identity_status),
+            ("Additional Images", result.additional_image_count), ("Session Cache Hits", result.cache_hits), ("Identity Check", result.identity_status),
             ("S/N", result.identity_values.get("sn", "")), ("MAC", result.identity_values.get("mac", "")),
             ("GPON S/N", result.identity_values.get("gpon_sn", "")), ("Work Order P/N", expected.get("pn", "")),
             ("Made in", expected.get("made_in", "")), ("Need More Image", ", ".join(result.unresolved_items)),

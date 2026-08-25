@@ -1,14 +1,21 @@
-# Label Auto Inspection Tool V1.8.1
+# Label Auto Inspection Tool V1.8.2
 
-## V1.8.1 - Performance & Manual Review UI Optimization
+## V1.8.2 - Performance Stage-2 / Incremental Image Analysis
 
-- Manual Review panel is now fixed above the expandable Image Inspection result table so operator PASS controls remain visible on shorter screens.
-- Added vertical scrolling to the Manual Review list and both vertical/horizontal scrolling to the Image Inspection result table.
-- Removed duplicate Compliance/Artwork shape evaluation during multi-image photo-role rescue by reusing the first detector result. The scoring/threshold logic is unchanged.
-- Kept V1.8.0 manual PASS restrictions: identity, barcode and consistency checks cannot be overridden.
-- Removed duplicate REPORT performance-log entry.
-- Regression validation: 200 tests expected after V1.8.1 additions.
+V1.8.2 keeps the validated V1.8.1 recognition thresholds and Manual Review UI, but changes the multi-image execution architecture so adding a photo does not OCR older photos again.
 
+Key changes:
+- Session-level SHA-256 image fingerprint cache. Previously analyzed content is logged as `CACHE_HIT ... action=SKIP_OCR`.
+- Incremental execution: `Run / Analyze New` reuses the existing `MultiImageResult`; only new unique images are sent to OCR/artwork analysis.
+- Evidence-driven target list: after the first run, only unresolved/conflicting items are requested from additional photos.
+- Early PASS: if all required evidence is already complete, newly added photos are recorded as `SKIPPED_AFTER_PASS` without OCR. Use `Force Re-analyze All` for engineering verification when intentional re-analysis is required.
+- Duplicate-content protection: the same photo renamed to another filename is still a cache hit.
+- Cache safety: Profile/Golden/work-order/software context changes invalidate the session instead of reusing stale evidence.
+- Manual Review precedence is preserved across incremental runs. `Automatic Overall` remains the original machine decision while final `Overall` can remain `PASS_WITH_MANUAL_REVIEW`.
+- V1.8.1 Compliance artwork detector cache and fixed Manual Review layout are retained.
+- Regression validation: 206 tests pass.
+
+Field benchmark reference supplied by operator: V1.8.1 five-image run ~163.2 s. V1.8.2 should be compared using `performance.log`; no unverified runtime claim is embedded in this release.
 
 ## V1.8.0 main changes
 - Image Label Inspection now follows a guided five-photo evidence plan: Full Label + Basic/Logo + WiFi/User + Identity/Barcode + Compliance/Artwork.

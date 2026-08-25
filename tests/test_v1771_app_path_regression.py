@@ -16,5 +16,7 @@ def test_v178_image_inspection_runs_in_background_worker_and_polls_queue():
 def test_v178_run_and_recheck_use_common_nonblocking_launcher():
     source = Path('label_tool/app.py').read_text(encoding='utf-8')
     assert "def _start_image_job" in source
-    assert "def inspect_images(self):\n        self._start_image_job" in source
+    assert "def inspect_images(self):" in source
+    inspect_block = source[source.index("def inspect_images(self):"):source.index("def recheck_unresolved(self):")]
+    assert "self._start_image_job" in inspect_block
     assert "action='recheck unresolved'" in source
