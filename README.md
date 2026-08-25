@@ -1,8 +1,8 @@
-# Label Auto Inspection Tool V1.9.2
+# Label Auto Inspection Tool V1.9.3
 
 ## Dynamic Golden Profile Engine
 
-V1.9.2 keeps the validated V1.8.2 incremental image cache and Manual Review workflow, and adds external Golden-driven profiles so a new label can be introduced without editing Python or rebuilding the EXE.
+V1.9.3 keeps the validated V1.8.2 incremental image cache and Manual Review workflow, and adds external Golden-driven profiles so a new label can be introduced without editing Python or rebuilding the EXE.
 
 ### New workflow
 1. Select the closest existing profile as a baseline.

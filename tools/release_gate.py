@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = '1.9.2'
+EXPECTED_VERSION = '1.9.3'
 REQUIRED = [
     '.github/workflows/build.yml',
     'label_tool/__init__.py',
