@@ -146,7 +146,7 @@ class App(tk.Tk):
                     base_name=candidate; break
         base=self.profiles[base_name][1]
         try:
-            # V1.9.2: identity is generated ONLY from imported Golden metadata.
+            # V1.9.3: identity is generated ONLY from imported Golden metadata.
             # Do not ask for / seed a model-dependent profile name here.
             path,profile=build_dynamic_profile(source,base)
             identity_errors=dynamic_identity_errors(profile,path)
@@ -409,7 +409,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.2 Stable Dynamic Golden Profile + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.3 Stable Dynamic Golden Profile + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -1964,7 +1964,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.2 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.3 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

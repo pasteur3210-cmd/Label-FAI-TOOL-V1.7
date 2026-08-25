@@ -205,7 +205,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.2',
+        'profile_version':'1.9.3',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
