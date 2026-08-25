@@ -106,6 +106,7 @@ class App(tk.Tk):
         self.image_cancel_event = threading.Event()
         self.image_poll_job = None
         self.image_job_running = False
+        self.image_manual_note_var = tk.StringVar(value="Visual inspection confirmed")
         self.expected_pn = tk.StringVar()
         self.expected_country = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
@@ -256,6 +257,19 @@ class App(tk.Tk):
         for c in cols:
             self.image_tree.heading(c,text=c.title()); self.image_tree.column(c,width=widths[c],anchor="w")
         self.image_tree.pack(fill="both",expand=True)
+
+        manual=ttk.LabelFrame(right,text="Manual Review / 人工目檢輔助",padding=6)
+        manual.pack(fill="x",pady=(6,0))
+        ttk.Label(manual,text="Select unresolved visual items, then confirm by visual inspection. Identity/barcode/consistency items cannot be overridden.").grid(row=0,column=0,columnspan=4,sticky="w")
+        self.image_manual_list=tk.Listbox(manual,selectmode="extended",height=4,exportselection=False)
+        self.image_manual_list.grid(row=1,column=0,columnspan=4,sticky="ew",pady=4)
+        ttk.Label(manual,text="Note:").grid(row=2,column=0,sticky="w")
+        ttk.Entry(manual,textvariable=self.image_manual_note_var,width=52).grid(row=2,column=1,sticky="ew",padx=4)
+        self.image_manual_pass_btn=ttk.Button(manual,text="Confirm Selected as PASS",command=self.manual_review_selected,state="disabled")
+        self.image_manual_pass_btn.grid(row=2,column=2,padx=4)
+        self.image_manual_refresh_btn=ttk.Button(manual,text="Refresh Review List",command=self._refresh_manual_review_list,state="disabled")
+        self.image_manual_refresh_btn.grid(row=2,column=3,padx=4)
+        manual.columnconfigure(1,weight=1)
 
     def _reload_profiles(self):
         cur=self.profile_var.get(); self._load_profiles(); self.profile_combo['values']=list(self.profiles.keys())
@@ -1589,9 +1603,11 @@ class App(tk.Tk):
         except Exception as e:messagebox.showerror('Image Error',str(e))
 
     def _render_multi_image_result(self,result):
-        color='green' if result.overall=='PASS' else ('#B8860B' if result.overall=='NEED_MORE_IMAGE' else 'red')
+        color='green' if result.overall in ('PASS','PASS_WITH_MANUAL_REVIEW') else ('#B8860B' if result.overall=='NEED_MORE_IMAGE' else 'red')
         self.image_overall.config(text=result.overall,fg=color)
         for x in self.image_tree.get_children():self.image_tree.delete(x)
+        try:self.image_manual_list.delete(0,"end"); self.image_manual_pass_btn.config(state="disabled"); self.image_manual_refresh_btn.config(state="disabled")
+        except Exception:pass
         required=self.multi_image_engine._required_items()
         for item in required:
             if item in result.conflicts:
@@ -1607,6 +1623,53 @@ class App(tk.Tk):
             f"Need more: {len(result.unresolved_items)} | Report: {result.report_path}"
         )
         self.status_var.set(f"Multi-image inspection {result.overall} | {result.session_dir}")
+        self._refresh_manual_review_list()
+
+    def _refresh_manual_review_list(self):
+        try:
+            self.image_manual_list.delete(0,"end")
+        except Exception:
+            return
+        result=self.multi_image_result
+        if result is None:
+            try:self.image_manual_pass_btn.config(state="disabled"); self.image_manual_refresh_btn.config(state="disabled")
+            except Exception:pass
+            return
+        candidates=[]
+        required=self.multi_image_engine._required_items()
+        for item in required:
+            ev=result.evidence.get(item)
+            auto="CONFLICT" if item in result.conflicts else (ev.result if ev else "NEED_MORE_IMAGE")
+            if auto in ("PASS","MANUAL_PASS"):
+                continue
+            if self.multi_image_engine._manual_review_allowed(item):
+                candidates.append((item,auto))
+        for item,auto in candidates:
+            self.image_manual_list.insert("end",f"[{auto}] {item}")
+        self._manual_review_items=[x[0] for x in candidates]
+        state="normal" if candidates and not self.image_job_running else "disabled"
+        try:self.image_manual_pass_btn.config(state=state); self.image_manual_refresh_btn.config(state="normal")
+        except Exception:pass
+
+    def manual_review_selected(self):
+        if self.image_job_running:
+            messagebox.showinfo("Manual Review","Wait for image inspection to finish first."); return
+        if self.multi_image_result is None:
+            messagebox.showinfo("Manual Review","Run Image Label Inspection first."); return
+        sels=list(self.image_manual_list.curselection())
+        if not sels:
+            messagebox.showwarning("Manual Review","Select one or more visual items first."); return
+        items=[self._manual_review_items[i] for i in sels if i < len(self._manual_review_items)]
+        if not items:return
+        note=(self.image_manual_note_var.get() or "Visual inspection confirmed").strip()
+        msg="Confirm manual PASS for:\n\n"+"\n".join(f"• {x}" for x in items)+f"\n\nNote: {note}\n\nAutomatic result will be preserved in logs/report."
+        if not messagebox.askyesno("Manual Visual Review",msg):return
+        try:
+            self.multi_image_result=self.multi_image_engine.apply_manual_pass(self.multi_image_result,items,note)
+            self._render_multi_image_result(self.multi_image_result)
+            self.image_progress_var.set(f"Manual review saved | {len(items)} item(s) | {self.multi_image_result.overall}")
+        except Exception as exc:
+            messagebox.showerror("Manual Review Error",str(exc))
 
     def _set_image_controls_busy(self, busy: bool):
         self.image_job_running=bool(busy)
@@ -1620,6 +1683,11 @@ class App(tk.Tk):
         # results cannot be rendered under a different label profile.
         try:self.profile_combo.config(state="disabled" if busy else "readonly")
         except Exception:pass
+        if busy:
+            try:self.image_manual_pass_btn.config(state="disabled"); self.image_manual_refresh_btn.config(state="disabled")
+            except Exception:pass
+        else:
+            self._refresh_manual_review_list()
 
     def _image_progress_callback(self, event: dict):
         self.image_worker_queue.put(("progress",dict(event or {})))
@@ -1713,6 +1781,11 @@ class App(tk.Tk):
         self.image_overall.config(text='--',fg='black')
         self.image_preview.config(image='',text='Load one or more label photos'); self.image_preview.image=None
         for x in self.image_tree.get_children():self.image_tree.delete(x)
+        try:
+            self.image_manual_list.delete(0,"end")
+            self.image_manual_pass_btn.config(state="disabled")
+            self.image_manual_refresh_btn.config(state="disabled")
+        except Exception:pass
 
     def destroy(self):
         try:self.image_cancel_event.set()

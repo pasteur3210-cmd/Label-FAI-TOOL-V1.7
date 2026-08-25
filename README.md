@@ -1,6 +1,6 @@
-# Label Auto Inspection Tool V1.7.9.1
+# Label Auto Inspection Tool V1.8.0
 
-## V1.7.9.1 main changes
+## V1.8.0 main changes
 - Image Label Inspection now follows a guided five-photo evidence plan: Full Label + Basic/Logo + WiFi/User + Identity/Barcode + Compliance/Artwork.
 - Partial close-ups are no longer required to pass full-label perspective registration before their text/barcode evidence can be used.
 - Original-photo full-frame barcode/QR decode and OCR evidence are fused across photos, then relationship rules are re-run at session level.
@@ -12,7 +12,7 @@
 
 Windows GUI label inspection tool for GRG-4297u Chassis Label and Inner Box Label.
 
-## V1.7.9.1 main changes
+## V1.8.0 main changes
 
 - Adds **Image Label Inspection** production mode.
 - Users can select multiple JPG/JPEG/PNG/BMP images in one batch.
@@ -38,7 +38,7 @@ Multi-image sessions: `image_records/`
 Each multi-image session contains source images, per-image diagnostic outputs, `execution.log`, `test.log`, `debug.log`, `result.json`, and `Label_Image_Inspection_Report_*.xlsx`.
 
 
-## V1.7.9.1 hotfix
+## V1.8.0 hotfix
 
 - Fixes GitHub Ruff F821 failure in multi-image `Add Images` UI path display.
 - Reuses the already imported `os.path.basename()` instead of the undefined `Path` symbol.
@@ -46,14 +46,20 @@ Each multi-image session contains source images, per-image diagnostic outputs, `
 - No inspection algorithm, Artwork, OCR, Barcode, Camera, Smart Lock, or report logic was changed.
 
 
-## V1.7.9.1
+## V1.8.0
 - Non-blocking background worker for multi-image inspection with progress/cancel.
 - Recheck Unresolved keeps prior evidence and filters new evidence to unresolved/conflict items.
 - Per-image performance.log.
 - COMTREND specialist detector: tighter Golden ROI + normalized gray/edge hybrid.
 
-## V1.7.9.1 field hotfix
+## V1.8.0 field hotfix
 - Fixes false WiFi/WPA Key `CONFLICT` when general OCR confuses uppercase/lowercase but another photo exactly matches the decoded WiFi QR value.
 - WiFi Key is still case-sensitive. Case-only ambiguity without exact evidence becomes `NEED_MORE_IMAGE`.
 - Improves five-photo role assignment; compliance close-ups can be recognized from multiple compliance symbols.
 - Phone-photo OCR is processed at a camera-like OCR resolution while barcode/artwork keep original resolution.
+
+## V1.8.0 main changes
+- Image Label Inspection: targeted `GPON VoIP Gateway` fixed-text rescue using fuzzy phrase confirmation and Golden-relative target OCR. This addresses the field case where OCR returned `GPON VolP Gateway` although the printed phrase was visually clear.
+- Added Manual Review / visual-assist list for unresolved visual items. Eligible items can be confirmed as `MANUAL_PASS`; machine identity, barcode, and consistency items cannot be manually overridden.
+- Final overall is `PASS_WITH_MANUAL_REVIEW` when automatic inspection is completed only with traceable human visual review.
+- Excel/result.json now preserve automatic result, final result, manual-review flag/note, source image, and timestamp. execution/test/debug logs record every manual override.

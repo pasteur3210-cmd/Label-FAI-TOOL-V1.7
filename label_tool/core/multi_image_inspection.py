@@ -20,6 +20,7 @@ from .decoder import decode_codes_multi
 from .parser import merge_fields
 from .rules import validate
 from .preprocess import normalize_for_ocr
+from .direct_guided_ocr import best_line_similarity, crop_relative
 from .image_quality import evaluate_image_quality
 
 log = logging.getLogger(__name__)
@@ -117,6 +118,9 @@ class MultiImageResult:
     photo_roles: dict = field(default_factory=dict)
     position_evidence: dict = field(default_factory=dict)
     closeup_shape_evidence: dict = field(default_factory=dict)
+    manual_overrides: dict = field(default_factory=dict)
+    automatic_overall: str = ""
+    expected_work_order: dict = field(default_factory=dict)
 
 
 class MultiImageInspectionEngine:
@@ -193,6 +197,120 @@ class MultiImageInspectionEngine:
                 return "NEED_MORE_IMAGE"
             return "FAIL"
         return "NEED_MORE_IMAGE"
+
+
+    @staticmethod
+    def _manual_review_allowed(item: str) -> bool:
+        item = str(item or "")
+        if item.startswith("Fixed: ") or item.startswith("Artwork: "):
+            return True
+        return item in {"Variable: Made in Format"}
+
+    def _rescue_fixed_phrase(self, row_map: dict, raw_text: str, corrected_path: str, item: str, expected: str, roi, threshold: float = 0.74):
+        """V1.8.0 targeted fixed-phrase rescue for clear photos.
+
+        General OCR can miss a visually obvious fixed phrase even when the
+        image is sharp.  First compare lines from original-photo OCR; if that
+        is insufficient, OCR a small Golden-relative crop from the corrected
+        full-label image.  This is intentionally limited to fixed text and
+        never changes barcode/identity rules.
+        """
+        old = row_map.get(item)
+        if old is not None and getattr(old, "status", "") == "PASS":
+            return
+        best_score, best = best_line_similarity(raw_text or "", expected)
+        source = "full-photo OCR"
+        target_img = None
+        if best_score < threshold and corrected_path:
+            try:
+                corrected = self._safe_load(corrected_path)
+                if corrected is not None:
+                    target_img = crop_relative(corrected, roi)
+                    tsh = self._sharpness(target_img)
+                    if target_img is not None and target_img.size and tsh >= 12.0:
+                        txt, _ = self.base.ocr.read(normalize_for_ocr(target_img))
+                        score2, best2 = best_line_similarity(txt or "", expected)
+                        if score2 > best_score:
+                            best_score, best = score2, best2
+                            source = f"normalized target OCR sharpness={tsh:.1f}"
+            except Exception as exc:
+                log.debug("MULTI_IMAGE_FIXED_PHRASE_RESCUE_ERROR item=%s err=%s", item, exc)
+        if best_score >= threshold:
+            row_map[item] = FieldResult(
+                name=item, actual="Present", expected=expected, status="PASS",
+                message=f"Targeted fixed-text confirmation similarity={best_score:.3f}; {source}",
+                error_code="",
+            )
+        elif old is not None:
+            old.message = (old.message + f" | targeted similarity={best_score:.3f}").strip(" |")
+
+    def apply_manual_pass(self, result: MultiImageResult, items: list[str], note: str = "Visual inspection confirmed") -> MultiImageResult:
+        """Apply traceable human visual review to eligible visual items.
+
+        Identity/barcode/consistency items are deliberately blocked from manual
+        override.  The automatic result is preserved in manual_overrides and
+        Excel/result.json; the final state becomes MANUAL_PASS.
+        """
+        if result is None:
+            raise ValueError("No image inspection result")
+        session_dir = Path(result.session_dir)
+        now = datetime.now().isoformat(timespec="seconds")
+        changed=[]
+        for item in items:
+            item=str(item)
+            if not self._manual_review_allowed(item):
+                raise ValueError(f"Manual PASS is not allowed for machine identity/consistency item: {item}")
+            old = result.evidence.get(item)
+            auto_result = "CONFLICT" if item in result.conflicts else (old.result if old else "NEED_MORE_IMAGE")
+            if auto_result in ("PASS", "MANUAL_PASS"):
+                continue
+            result.manual_overrides[item] = {
+                "timestamp": now, "auto_result": auto_result, "final_result": "MANUAL_PASS",
+                "note": note, "source_image": old.source_image if old else "",
+                "auto_actual": old.actual if old else "", "auto_message": old.message if old else "",
+            }
+            result.evidence[item] = ImageEvidence(
+                item=item, result="MANUAL_PASS", actual=(old.actual if old else "Visual confirmed"),
+                expected=(old.expected if old else "Visual inspection"),
+                source_image=(old.source_image if old else "MANUAL_REVIEW"),
+                quality_score=(old.quality_score if old else 1.0),
+                message=f"Manual visual review: {note}", error_code="MANUAL-OVERRIDE", photo_role="MANUAL",
+            )
+            result.conflicts.pop(item, None)
+            changed.append((item, auto_result))
+
+        required=self._required_items()
+        unresolved=[]; hard_fail=[]
+        for item in required:
+            if item in result.conflicts:
+                continue
+            ev=result.evidence.get(item)
+            if ev is None or ev.result in ("NEED_MORE_IMAGE", "ERROR"):
+                unresolved.append(item)
+            elif ev.result == "FAIL":
+                hard_fail.append(item)
+        result.unresolved_items=unresolved
+        if result.identity_status == "MISMATCH":
+            result.overall="IDENTITY_MISMATCH"
+        elif result.conflicts:
+            result.overall="CONFLICT"
+        elif hard_fail:
+            result.overall="FAIL"
+        elif unresolved:
+            result.overall="NEED_MORE_IMAGE"
+        elif result.manual_overrides:
+            result.overall="PASS_WITH_MANUAL_REVIEW"
+        else:
+            result.overall="PASS"
+
+        for path_name, prefix in [("execution.log","MANUAL_REVIEW"),("test.log","MANUAL_REVIEW_RESULT"),("debug.log","MANUAL_REVIEW_DEBUG")]:
+            path=session_dir/path_name
+            with path.open("a",encoding="utf-8") as f:
+                for item,auto in changed:
+                    f.write(f"{datetime.now().isoformat(timespec='milliseconds')} | {prefix} item={item} auto={auto} final=MANUAL_PASS note={note!r}\n")
+        result.report_path=self._write_excel(result,result.expected_work_order or {})
+        (session_dir/"result.json").write_text(json.dumps(self._serialize(result),ensure_ascii=False,indent=2),encoding="utf-8")
+        return result
 
     def _role_items(self):
         label_type = str(self.profile.get("label_type", self.profile.get("profile_name", ""))).lower()
@@ -367,6 +485,13 @@ class MultiImageInspectionEngine:
             # it supplies layout/position evidence and legacy ROI evidence.
             one = self.base.inspect(image_path, str(per_root), expected)
             rows_by_name = {r.name: r for r in one.fields}
+            # V1.8.0: targeted rescue for the visually obvious GPON phrase.
+            label_type = str(self.profile.get("label_type", "")).lower()
+            gateway_roi = [0.04, 0.12, 0.46, 0.22] if "chassis" in label_type else [0.01, 0.14, 0.43, 0.29]
+            self._rescue_fixed_phrase(
+                rows_by_name, raw_text, getattr(one, "corrected_image_path", ""),
+                "Fixed: GPON VoIP Gateway", "GPON VoIP Gateway", gateway_roi, 0.72
+            )
         else:
             # Detail photos deliberately skip detect_label/perspective/legacy ROI
             # processing. This avoids the V1.7.8 failure mode where a clear
@@ -387,6 +512,11 @@ class MultiImageInspectionEngine:
                 old = rows_by_name.get(r.name)
                 if old is None or r.status == "PASS" or old.status != "PASS":
                     rows_by_name[r.name] = r
+        if role in ("BASIC", "DETAIL"):
+            self._rescue_fixed_phrase(
+                rows_by_name, raw_text, "",
+                "Fixed: GPON VoIP Gateway", "GPON VoIP Gateway", [0,0,1,1], 0.72
+            )
 
         # Artwork: full overview supplies relative position. Basic/Compliance
         # close-ups may supply higher-resolution shape evidence. Size is ignored.
@@ -553,6 +683,7 @@ class MultiImageInspectionEngine:
                 f.write(f"{datetime.now().isoformat(timespec='milliseconds')} | {text}\n")
 
         result = previous_session or MultiImageResult(session_id=sid, session_dir=str(session_dir))
+        result.expected_work_order = dict(expected or result.expected_work_order or {})
         targets = None if target_items is None else set(target_items)
 
         def progress(stage, index=0, total=0, image="", elapsed_ms=None, **extra):
@@ -674,6 +805,8 @@ class MultiImageInspectionEngine:
                 hard_fail.append(item)
         result.unresolved_items = unresolved
 
+        if not result.automatic_overall:
+            result.automatic_overall = "PENDING"
         if result.identity_status == "MISMATCH":
             result.overall = "IDENTITY_MISMATCH"
         elif conflicts:
@@ -685,6 +818,7 @@ class MultiImageInspectionEngine:
         else:
             result.overall = "PASS"
 
+        result.automatic_overall = result.overall
         write(test_log, f"RESULT overall={result.overall} images={result.image_count} identity={result.identity_status} roles={result.photo_roles} unresolved={unresolved} conflicts={list(conflicts)} hard_fail={hard_fail}")
         write(execution_log, f"IMAGE_INSPECTION_END overall={result.overall} total_images={result.image_count} roles={result.photo_roles}")
 
@@ -712,6 +846,9 @@ class MultiImageInspectionEngine:
             "field_sources": result.field_sources,
             "position_evidence": result.position_evidence,
             "closeup_shape_evidence": result.closeup_shape_evidence,
+            "automatic_overall": result.automatic_overall,
+            "manual_overrides": result.manual_overrides,
+            "expected_work_order": result.expected_work_order,
             "evidence": {k: asdict(v) for k, v in result.evidence.items()},
             "conflicts": {k: [asdict(x) for x in v] for k, v in result.conflicts.items()},
             "report_path": result.report_path,
@@ -727,7 +864,8 @@ class MultiImageInspectionEngine:
         warn = wb.add_format({"border": 1, "bg_color": "#FFF2CC", "font_color": "#7F6000", "bold": True})
         ws = wb.add_worksheet("Summary")
         rows = [
-            ("Overall", result.overall), ("Inspection Mode", "GUIDED_MULTI_IMAGE"),
+            ("Overall", result.overall), ("Automatic Overall", result.automatic_overall or result.overall),
+            ("Manual Overrides", len(result.manual_overrides)), ("Inspection Mode", "GUIDED_MULTI_IMAGE"),
             ("Recommended Capture", "Full Label + Basic + WiFi + Identity + Compliance"),
             ("Profile", self.profile.get("profile_name", "")), ("Label Type", self.profile.get("label_type", "")),
             ("Software Version", self.software_version), ("Session ID", result.session_id),
@@ -745,17 +883,20 @@ class MultiImageInspectionEngine:
             ws.write(r, 1, str(v), fmt)
 
         out = wb.add_worksheet("Inspection_Result")
-        heads = ["Item", "Result", "Actual", "Expected", "Evidence Image", "Photo Role", "Quality Score", "Message", "Error Code"]
+        heads = ["Item", "Auto Result", "Final Result", "Manual Review", "Actual", "Expected", "Evidence Image", "Photo Role", "Quality Score", "Message", "Error Code"]
         for col, name in enumerate(heads): out.write(0, col, name, h)
-        out.set_column(0, 0, 42); out.set_column(1, 1, 18); out.set_column(2, 3, 30); out.set_column(4, 5, 36); out.set_column(6, 6, 14); out.set_column(7, 8, 58)
+        out.set_column(0, 0, 42); out.set_column(1, 3, 18); out.set_column(4, 5, 30); out.set_column(6, 7, 36); out.set_column(8, 8, 14); out.set_column(9, 10, 58)
         for r, item in enumerate(self._required_items(), 1):
             ev = result.evidence.get(item)
+            manual = result.manual_overrides.get(item, {})
             if item in result.conflicts:
-                vals = [item, "CONFLICT", "", "", "Multiple images", "SESSION", "", "Conflicting high-quality evidence", ""]
+                auto = "CONFLICT"
+                vals = [item, auto, auto, "No", "", "", "Multiple images", "SESSION", "", "Conflicting high-quality evidence", ""]
             elif ev:
-                vals = [item, ev.result, ev.actual, ev.expected, ev.source_image, ROLE_LABELS.get(ev.photo_role, ev.photo_role), round(ev.quality_score, 3), ev.message, ev.error_code]
+                auto = manual.get("auto_result", ev.result)
+                vals = [item, auto, ev.result, "Yes" if manual else "No", ev.actual, ev.expected, ev.source_image, ROLE_LABELS.get(ev.photo_role, ev.photo_role), round(ev.quality_score, 3), ev.message, ev.error_code]
             else:
-                vals = [item, "NEED_MORE_IMAGE", "", "", "", "", "", "No usable evidence", ""]
+                vals = [item, "NEED_MORE_IMAGE", "NEED_MORE_IMAGE", "No", "", "", "", "", "", "No usable evidence", ""]
             for col, v in enumerate(vals): out.write(r, col, v, c)
 
         photos = wb.add_worksheet("Photo_Roles")

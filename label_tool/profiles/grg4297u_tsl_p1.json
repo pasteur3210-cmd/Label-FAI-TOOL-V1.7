@@ -1,6 +1,6 @@
 {
   "profile_name": "Chassis Label",
-  "profile_version": "1.7.9.1",
+  "profile_version": "1.8.0",
   "source_spec": "680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label / Request Form V3.0",
   "fixed_fields": {
     "model": "GRG-4297u",
@@ -90,7 +90,8 @@
     "V1.7.5 uses PASS/VERIFY/FAIL dead-bands to reduce frame-to-frame false NG near shape/position thresholds.",
     "V1.7.6.1 Chassis CLASS 1 LASER PRODUCT uses normalized-label targeted OCR; session Excel is saved on PASS and manual stop/incomplete runs.",
     "V1.7.9.1 Image Label Inspection uses guided multi-photo evidence: Full Label + Basic + WiFi + Identity + Compliance. Partial close-ups are not forced through full-label registration.",
-    "V1.7.9.1 fuses raw facts across photos and re-runs session-level relationship rules; full-label overview supplies artwork position while close-ups may supply artwork shape evidence."
+    "V1.7.9.1 fuses raw facts across photos and re-runs session-level relationship rules; full-label overview supplies artwork position while close-ups may supply artwork shape evidence.",
+    "V1.8.0 adds targeted GPON VoIP Gateway fixed-text rescue in Image Label Inspection and traceable Manual Review PASS for eligible visual items."
   ],
   "model": "GRG-4297u",
   "label_pn": "680010-378",
