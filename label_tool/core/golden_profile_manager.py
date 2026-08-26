@@ -139,7 +139,16 @@ def _candidate_model(text: str, fallback: str='') -> str:
 
 
 def _candidate_label_pn(text: str, fallback: str='') -> str:
-    m=re.search(r'\b\d{6}-\d{3}\b',text)
+    t=str(text or '').replace('：',':')
+    # Controlled Request Forms may contain both Blank Label P/N and Chassis
+    # Label P/N. Always prefer the explicit Chassis/Label Part Number field.
+    for pat in (
+        r'Chassis\s+Label\s+Part\s+Number\s*:\s*(\d{6}-\d{3})',
+        r'Label\s+Part\s+Number\s*:\s*(\d{6}-\d{3})',
+    ):
+        m=re.search(pat,t,re.I)
+        if m: return m.group(1)
+    m=re.search(r'\b\d{6}-\d{3}\b',t)
     return m.group(0) if m else fallback
 
 
@@ -197,9 +206,133 @@ def _ocr_golden_images(images: list[Path]) -> tuple[str, list[dict]]:
 
 def _largest_image(images: list[Path]) -> Path|None:
     if not images: return None
-    return max(images,key=lambda p:p.stat().st_size if p.exists() else 0)
+    # Manual Review uses PIL/Tk. Prefer common raster formats over EMF/WMF
+    # artwork objects embedded in Word, even when the vector file is larger.
+    raster=[p for p in images if p.suffix.lower() in ('.png','.jpg','.jpeg','.bmp','.webp') and p.exists()]
+    candidates=raster or [p for p in images if p.exists()]
+    if not candidates: return None
+    return max(candidates,key=lambda p:p.stat().st_size)
 
 
+
+
+
+STANDARD_LIBRARY = [
+    {'item':'Fixed: model','label':'Model / Customer model','role':'BASIC'},
+    {'item':'Variable: P/N Format','label':'Part Number format','role':'BASIC'},
+    {'item':'Variable: Made in Format','label':'Made in country','role':'COMPLIANCE'},
+    {'item':'Variable: S/N Human Readable Format','label':'S/N human readable','role':'IDENTITY'},
+    {'item':'Variable: S/N Barcode Format','label':'S/N barcode','role':'IDENTITY'},
+    {'item':'Consistency: S/N Text vs Barcode','label':'S/N text vs barcode consistency','role':'IDENTITY'},
+    {'item':'Variable: MAC Human Readable Format','label':'MAC human readable','role':'IDENTITY'},
+    {'item':'Variable: MAC Barcode Format','label':'MAC barcode','role':'IDENTITY'},
+    {'item':'Consistency: MAC Text vs Barcode','label':'MAC text vs barcode consistency','role':'IDENTITY'},
+    {'item':'Variable: GPON S/N Human Readable Format','label':'GPON S/N human readable','role':'IDENTITY'},
+    {'item':'Variable: GPON S/N Barcode Format','label':'GPON S/N barcode','role':'IDENTITY'},
+    {'item':'Consistency: GPON S/N Text vs Barcode','label':'GPON S/N text vs barcode consistency','role':'IDENTITY'},
+    {'item':'Variable: SSID Format','label':'SSID format','role':'WIFI'},
+    {'item':'Variable: WiFi Key Format','label':'WiFi Key format','role':'WIFI'},
+    {'item':'Variable: WiFi QR Format','label':'QR content / WiFi QR','role':'WIFI'},
+    {'item':'Consistency: QR SSID vs Printed SSID','label':'QR SSID vs printed SSID','role':'WIFI'},
+    {'item':'Consistency: QR Key vs Printed WiFi Key','label':'QR Key vs printed WiFi Key','role':'WIFI'},
+    {'item':'Rule: SSID = MAC Last 6','label':'SSID = MAC last 6','role':'IDENTITY'},
+    {'item':'Rule: GPON S/N = Prefix + MAC Last 8','label':'GPON S/N = prefix + MAC last 8','role':'IDENTITY'},
+    {'item':'Variable: Password Format','label':'Password format','role':'WIFI'},
+]
+
+
+def _split_numbered_form_items(text: str) -> list[tuple[int,str]]:
+    """Extract every numbered Request-Form item, preserving unknown items.
+
+    Golden request forms are controlled documents. Completeness is more important
+    than semantic confidence: if an item is present in the form, it must appear in
+    the Profile review even when the parser cannot fully classify it.
+    """
+    lines=[' '.join(str(x).split()) for x in str(text or '').splitlines() if str(x).strip()]
+    items=[]; current_no=None; buf=[]
+    # Stop before administrative sections that are not label inspection items.
+    stop_markers=('Finished Information:', 'Manufacture Attention:', 'Label Example:')
+    for line in lines:
+        if any(line.startswith(m) for m in stop_markers):
+            if current_no is not None and buf:
+                items.append((current_no,' '.join(buf).strip()))
+            break
+        m=re.match(r'^\s*(\d{1,2})[.)]\s*(.+)$',line)
+        if m:
+            if current_no is not None and buf:
+                items.append((current_no,' '.join(buf).strip()))
+            current_no=int(m.group(1)); buf=[m.group(2).strip()]
+        elif current_no is not None:
+            # Continuation lines belong to the current numbered item.
+            buf.append(line)
+    else:
+        if current_no is not None and buf:
+            items.append((current_no,' '.join(buf).strip()))
+    # Deduplicate by form number, keeping the longest text representation.
+    by_no={}
+    for no,body in items:
+        if no not in by_no or len(body)>len(by_no[no]): by_no[no]=body
+    return [(n,by_no[n]) for n in sorted(by_no)]
+
+
+def _checkbox_selection(body: str) -> str:
+    t=str(body or '').replace('：',':')
+    # Word text extraction preserves the filled/empty square characters.
+    if re.search(r'■\s*Yes',t,re.I): return 'YES'
+    if re.search(r'■\s*No',t,re.I): return 'NO'
+    # Multi-choice fields (e.g. internal/customer model or Comtrend/Customer S/N).
+    if '■' in t:
+        after=t.split('■',1)[1].strip()
+        return ('SELECTED: '+after[:80]).strip()
+    return ''
+
+
+def _classify_form_item(no: int, body: str) -> dict:
+    t=' '.join(str(body or '').split())
+    low=t.lower()
+    selected=_checkbox_selection(t)
+    required=(selected != 'NO')
+    typ='Needs Review'; role='DETAIL'; mapping=[]; expected=''
+    if 'logo' in low:
+        typ='Golden Artwork'; role='BASIC'; mapping=['Artwork: COMTREND Logo']
+    elif any(k in low for k in ('fcc mark','weee mark','ce mark','ic mark','ul file listing')):
+        typ='Golden Artwork'; role='COMPLIANCE'
+        if 'weee' in low: mapping=['Artwork: WEEE Mark']
+        elif 'ce mark' in low: mapping=['Artwork: CE Mark']
+    elif 'qr code' in low or re.search(r'\bqr\b',low):
+        typ='Golden QR'; role='WIFI'; mapping=['Variable: WiFi QR Format']
+    elif 's/n number' in low or ('serial' in low and 'number' in low):
+        typ='Golden Barcode'; role='IDENTITY'; mapping=['Variable: S/N Human Readable Format','Variable: S/N Barcode Format','Consistency: S/N Text vs Barcode']
+    elif 'mac number' in low:
+        typ='Golden Barcode'; role='IDENTITY'; mapping=['Variable: MAC Human Readable Format','Variable: MAC Barcode Format','Consistency: MAC Text vs Barcode']
+    elif 'gpon sn' in low or 'gpon s/n' in low:
+        typ='Golden Barcode'; role='IDENTITY'; mapping=['Variable: GPON S/N Human Readable Format','Variable: GPON S/N Barcode Format','Consistency: GPON S/N Text vs Barcode']
+    elif low.startswith('ssid') or ' ssid' in low:
+        typ='Golden Variable'; role='WIFI'; mapping=['Variable: SSID Format']
+    elif 'wifi key' in low:
+        typ='Golden Variable'; role='WIFI'; mapping=['Variable: WiFi Key Format']
+    elif 'part no' in low or 'part number' in low:
+        typ='Golden Variable'; role='BASIC'; mapping=['Variable: P/N Format']
+    elif 'model name' in low or low.startswith('model'):
+        typ='Golden Choice'; role='BASIC'; mapping=['Fixed: model']
+    elif 'made in' in low:
+        typ='Golden Choice'; role='COMPLIANCE'; mapping=['Variable: Made in Format']
+    elif any(k in low for k in ('input','usb ','encryption type','product')):
+        typ='Golden Text'; role='BASIC'; expected=t
+    elif any(k in low for k in ('fcc id','add ')):
+        typ='Golden Text'; role='COMPLIANCE'; expected=t
+    label=t.split(':',1)[0].strip() or f'Item {no}'
+    return {
+        'form_no':no,'item':f'Golden #{no}: {label[:55]}','type':typ,'role':role,
+        'required':required,'selected':selected,'expected':expected,'raw_text':t,
+        'origin':'GOLDEN','source':'Golden','engine_items':mapping,
+        'manual_review_allowed':typ in ('Golden Text','Golden Artwork','Golden Choice','Needs Review'),
+        'review_status':'NEEDS_REVIEW' if typ=='Needs Review' else 'AUTO_CLASSIFIED',
+    }
+
+
+def extract_golden_form_items(text: str) -> list[dict]:
+    return [_classify_form_item(no,body) for no,body in _split_numbered_form_items(text)]
 
 SUPPORTED_STANDARD_ITEMS = {
     'Fixed: model', 'Variable: P/N Format', 'Variable: Made in Format',
@@ -330,67 +463,115 @@ def _standard_item_candidates(text: str) -> list[dict]:
 
 
 def _dynamic_item_rows(profile: dict) -> list[dict]:
-    """Return editable inspection rows for Profile Manager/tests."""
-    required=set((profile.get('live',{}) or {}).get('required_items',[]) or [])
-    dynamic={r.get('item'):r for r in (profile.get('dynamic_fixed_texts',[]) or []) if isinstance(r,dict)}
-    meta={r.get('item'):r for r in (profile.get('dynamic_standard_items',[]) or []) if isinstance(r,dict)}
-    role_lookup={}
-    for role,items in ((profile.get('image_inspection',{}) or {}).get('role_items',{}) or {}).items():
-        for item in items or []: role_lookup[item]=role
-    names=[]
-    for item in list(required)+list(dynamic)+list(meta):
-        if item and item not in names: names.append(item)
+    """Return Visual Profile rows. Golden form items are primary.
+
+    V1.9.5 deliberately does not flood the table with automatically inferred
+    Standard checks. Standard checks appear only after the engineer adds them
+    from the Standard Library.
+    """
     rows=[]
-    for item in names:
-        d=dynamic.get(item,{})
-        m=meta.get(item,{})
-        rows.append({
-            'item':item,
-            'type':'Golden Text' if item in dynamic else m.get('type',('Artwork' if str(item).startswith('Artwork:') else 'Standard')),
-            'role':role_lookup.get(item,d.get('role',m.get('role','DETAIL'))),
-            'required':item in required,
-            'threshold':d.get('threshold',''),
-            'expected':d.get('text',''),
-            'origin':d.get('origin',m.get('origin','MANUAL' if item not in required else 'PROFILE')),
-            'manual_review_allowed':bool(d.get('manual_review_allowed',str(item).startswith(('Golden Text:','Artwork:')))),
-        })
+    for raw in profile.get('golden_form_items',[]) or []:
+        if not isinstance(raw,dict): continue
+        r=deepcopy(raw)
+        r.setdefault('source','Golden'); r.setdefault('origin','GOLDEN')
+        r.setdefault('threshold',''); r.setdefault('expected',r.get('expected',''))
+        rows.append(r)
+    # Explicit Standard Library / manual additions only.
+    for raw in profile.get('dynamic_standard_items',[]) or []:
+        if not isinstance(raw,dict): continue
+        origin=str(raw.get('origin',''))
+        if origin in ('AUTO_GOLDEN','AUTO_INFERRED'):
+            continue
+        r=deepcopy(raw)
+        r.setdefault('source','Standard Library' if origin=='STANDARD_LIBRARY' else 'Manual')
+        r.setdefault('threshold',''); r.setdefault('expected','')
+        rows.append(r)
+    # Backward-compatible Dynamic Golden Text rows for image-only Goldens.
+    if not profile.get('golden_form_items'):
+        for raw in profile.get('dynamic_fixed_texts',[]) or []:
+            if not isinstance(raw,dict): continue
+            rows.append({
+                'item':raw.get('item',''),'type':'Golden Text','role':raw.get('role','DETAIL'),
+                'required':bool(raw.get('required',True)),'threshold':raw.get('threshold',0.74),
+                'expected':raw.get('text',''),'origin':'GOLDEN','source':'Golden',
+                'manual_review_allowed':bool(raw.get('manual_review_allowed',True)),
+                'engine_items':[], 'review_status':'AUTO_CLASSIFIED',
+            })
     return rows
 
 
 def apply_editable_items(profile: dict, rows: list[dict]) -> dict:
-    """Apply Visual Profile Editor rows back to runtime profile data."""
+    """Apply Visual Profile Editor rows while keeping Legacy CAM/Image engine stable.
+
+    Golden rows describe the controlled document. Known Golden semantics map to
+    existing Legacy engine item names behind the scenes; Standard Library rows
+    are explicit engineer additions. Unknown Golden rows remain visible and
+    block validation instead of silently disappearing.
+    """
     profile=deepcopy(profile)
     live=profile.setdefault('live',{})
-    req=[]; dynamic=[]; standard=[]; role_items={}
-    for idx,row in enumerate(rows,1):
+    req=[]; dynamic=[]; standard=[]; golden=[]; role_items={}
+    def add_req(item,role):
+        if item and item not in req: req.append(item)
+        if item:
+            role_items.setdefault(role,[])
+            if item not in role_items[role]: role_items[role].append(item)
+    for idx,row0 in enumerate(rows,1):
+        row=deepcopy(row0 or {})
         item=str(row.get('item','')).strip()
         if not item: continue
-        typ=str(row.get('type','Standard')).strip() or 'Standard'
+        typ=str(row.get('type','Needs Review')).strip() or 'Needs Review'
         role=str(row.get('role','DETAIL')).strip().upper() or 'DETAIL'
         required=bool(row.get('required',False))
-        if required and item not in req: req.append(item)
-        role_items.setdefault(role,[])
-        if item not in role_items[role]: role_items[role].append(item)
+        origin=str(row.get('origin','MANUAL_EDIT') or 'MANUAL_EDIT')
+        is_golden=(origin=='GOLDEN' or str(row.get('source','')).lower()=='golden' or item.startswith('Golden #'))
+        if is_golden:
+            row.update({'item':item,'type':typ,'role':role,'required':required,'origin':'GOLDEN','source':'Golden'})
+            row.setdefault('engine_items',[])
+            golden.append(row)
+            if required:
+                for mapped in row.get('engine_items',[]) or []:
+                    add_req(str(mapped),role)
+            if typ=='Golden Text':
+                expected=str(row.get('expected','')).strip() or str(row.get('raw_text','')).strip()
+                if expected and required:
+                    dyn_item=item
+                    add_req(dyn_item,role)
+                    try: threshold=float(row.get('threshold',0.74) or 0.74)
+                    except Exception: threshold=0.74
+                    dynamic.append({
+                        'id':f'golden_{idx:02d}','name':item.replace('Golden ','',1)[:64],
+                        'item':dyn_item,'text':expected,'threshold':min(1.0,max(0.1,threshold)),
+                        'required':True,'role':role,'manual_review_allowed':True,'origin':'GOLDEN',
+                    })
+            continue
+        # Explicit Standard Library / custom engine item.
         if typ=='Golden Text':
             expected=str(row.get('expected','')).strip()
             if not expected: continue
             try: threshold=float(row.get('threshold',0.74) or 0.74)
             except Exception: threshold=0.74
-            threshold=min(1.0,max(0.1,threshold))
+            if required: add_req(item,role)
             dynamic.append({
                 'id':f'fixed_{idx:02d}','name':item.replace('Golden Text: ','',1)[:64],
-                'item':item,'text':expected,'threshold':threshold,'required':required,
-                'role':role,'manual_review_allowed':bool(row.get('manual_review_allowed',True)),
-                'origin':str(row.get('origin','MANUAL_EDIT')) or 'MANUAL_EDIT',
+                'item':item,'text':expected,'threshold':min(1.0,max(0.1,threshold)),
+                'required':required,'role':role,'manual_review_allowed':True,'origin':origin,
             })
         else:
-            standard.append({'item':item,'type':typ,'role':role,'required':required,'origin':str(row.get('origin','MANUAL_EDIT')) or 'MANUAL_EDIT'})
+            if required: add_req(item,role)
+            standard.append({'item':item,'type':'Standard','role':role,'required':required,'origin':origin,
+                             'source':'Standard Library' if origin=='STANDARD_LIBRARY' else 'Manual'})
     live['required_items']=req
-    # Custom targets only for dynamic text. They are generic fuzzy OCR targets.
     live['custom_targets']=[{
         'item':r['item'],'title':r['name'],'instruction':f"Place '{r['name']}' inside the target area.",
         'target_rect':[0.08,0.20,0.92,0.80],'mode':'fuzzy','expected':r['text'],'threshold':r['threshold']
     } for r in dynamic]
+    profile['golden_form_items']=golden
+    if isinstance(profile.get('golden_completeness'),dict):
+        doc_nums=[x for x in profile['golden_completeness'].get('document_item_numbers',[]) if x is not None]
+        got_nums={x.get('form_no') for x in golden if isinstance(x,dict)}
+        profile['golden_completeness']['profile_item_count']=len(golden)
+        profile['golden_completeness']['missing_item_numbers']=[x for x in doc_nums if x not in got_nums]
     profile['dynamic_fixed_texts']=dynamic
     profile['dynamic_standard_items']=standard
     profile.setdefault('image_inspection',{})['role_items']=role_items
@@ -448,7 +629,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.4',
+        'profile_version':'1.9.5',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -474,20 +655,34 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     if identity['model']:
         profile.setdefault('fixed_fields',{})['model']=identity['model']
     (root/'golden_text.txt').write_text(text,encoding='utf-8')
-    fixed=_fixed_text_candidates(text)
-    standard=_standard_item_candidates(text)
-    profile['dynamic_fixed_texts']=fixed
-    profile['dynamic_standard_items']=standard
-    rows=[]
-    for row in standard:
-        rows.append({**row,'threshold':'','expected':'','manual_review_allowed':False})
-    for row in fixed:
-        rows.append({
+    # V1.9.5: controlled Request Forms are parsed item-by-item. Every numbered
+    # Golden item is retained in Profile review; unknown semantics become
+    # Needs Review instead of disappearing. Standard engine checks are mapped
+    # behind the Golden row or added explicitly from Standard Library.
+    form_items=extract_golden_form_items(source_text)
+    if not form_items:
+        # Image-only / non-numbered fallback preserves the previously validated
+        # inference path. In Profile Manager these inferred Standard rows stay
+        # hidden; controlled numbered Request Forms use Golden-only review.
+        fixed=_fixed_text_candidates(text)
+        rows=[{
             'item':row['item'],'type':'Golden Text','role':row.get('role','DETAIL'),
             'required':bool(row.get('required',True)),'threshold':row.get('threshold',0.74),
-            'expected':row.get('text',''),'origin':'AUTO_GOLDEN','manual_review_allowed':True,
-        })
+            'expected':row.get('text',''),'origin':'GOLDEN','source':'Golden',
+            'manual_review_allowed':True,'engine_items':[],
+        } for row in fixed]
+        rows += [{**row,'threshold':'','expected':'','manual_review_allowed':False,'origin':'AUTO_GOLDEN','source':'Auto inferred'}
+                 for row in _standard_item_candidates(text)]
+    else:
+        rows=form_items
+    profile['dynamic_standard_items']=[]
     profile=apply_editable_items(profile,rows)
+    profile['golden_completeness']={
+        'document_item_count':len(form_items),
+        'profile_item_count':len(profile.get('golden_form_items',[]) or []),
+        'document_item_numbers':[x.get('form_no') for x in form_items],
+        'missing_item_numbers':[],
+    }
     profile['rules']=_rules_from_golden_text(text)
     profile['model_aliases']=[identity['model']]
     profile['customer_model']=''
@@ -495,6 +690,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     profile['profile_edit_log']=[{
         'edited_at':datetime.now().isoformat(timespec='seconds'),
         'action':'AUTO_GOLDEN_IMPORT','item_count':len(rows),
+        'document_item_count':len(form_items),
     }]
     layout=_largest_image(images)
     if layout:
@@ -532,13 +728,6 @@ def validate_profile_structure(profile: dict, path: Path|None=None) -> list[str]
             typ=str((row or {}).get('type','Standard'))
             if typ=='Standard' and item and item not in SUPPORTED_STANDARD_ITEMS:
                 errors.append(f'Unsupported Standard inspection item: {item}. Use Golden Text for custom fixed content.')
-        artwork_required=[x for x in req if str(x).startswith('Artwork: ')]
-        if artwork_required:
-            art=profile.get('artwork_verification',{}) or {}
-            configured={str(x.get('item') or ('Artwork: '+str(x.get('name','')))) for x in art.get('symbols',[]) or [] if isinstance(x,dict) and x.get('template')}
-            for item in artwork_required:
-                if not art.get('enabled') or item not in configured:
-                    errors.append(f'Artwork item requires a Golden template before validation: {item}')
     art=profile.get('artwork_verification',{}) or {}
     if art.get('enabled'):
         for s in art.get('symbols',[]) or []:
@@ -551,6 +740,37 @@ def validate_profile_structure(profile: dict, path: Path|None=None) -> list[str]
         except Exception: errors.append(f"Invalid threshold for {row.get('item')}")
     return errors
 
+
+
+def validation_readiness_errors(profile: dict) -> list[str]:
+    """Errors that block VALIDATED status but do not block saving a DRAFT."""
+    errors=[]
+    if not profile.get('dynamic_profile'):
+        return errors
+    comp=profile.get('golden_completeness',{}) or {}
+    missing=list(comp.get('missing_item_numbers',[]) or [])
+    if missing:
+        errors.append('Golden completeness: missing form items ' + ', '.join(map(str,missing)))
+    doc_count=int(comp.get('document_item_count',0) or 0)
+    prof_count=len(profile.get('golden_form_items',[]) or [])
+    if doc_count and prof_count < doc_count:
+        errors.append(f'Golden completeness: document has {doc_count} items but Profile has {prof_count}')
+    for row in profile.get('golden_form_items',[]) or []:
+        if not isinstance(row,dict) or not row.get('required',False):
+            continue
+        typ=str(row.get('type','Needs Review'))
+        no=row.get('form_no','?'); label=str(row.get('item',''))
+        if typ=='Needs Review':
+            errors.append(f'Golden item #{no} requires engineering review: {label}')
+        if typ in ('Golden Artwork','Golden QR','Golden Barcode','Golden Variable','Golden Choice') and not (row.get('engine_items') or []):
+            errors.append(f'Golden item #{no} has no Legacy CAM/Image mapping yet: {label}')
+        if typ=='Golden Artwork' and (row.get('engine_items') or []):
+            art=profile.get('artwork_verification',{}) or {}
+            configured={str(x.get('item') or ('Artwork: '+str(x.get('name','')))) for x in art.get('symbols',[]) or [] if isinstance(x,dict) and x.get('template')}
+            for mapped in row.get('engine_items',[]) or []:
+                if str(mapped).startswith('Artwork:') and (not art.get('enabled') or str(mapped) not in configured):
+                    errors.append(f'Golden item #{no} artwork template not configured for Legacy engine: {mapped}')
+    return errors
 
 
 def save_profile_identity_edits(path: Path, profile: dict, model: str, label_type: str,
@@ -567,7 +787,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.4'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.5'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})
@@ -589,7 +809,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     return new_path,new
 
 def mark_validated(path: Path, profile: dict) -> dict:
-    errors=validate_profile_structure(profile,path)
+    errors=validate_profile_structure(profile,path) + validation_readiness_errors(profile)
     if errors:
         raise ValueError('\n'.join(errors))
     profile=deepcopy(profile)

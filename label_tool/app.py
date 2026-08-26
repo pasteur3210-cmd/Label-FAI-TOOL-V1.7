@@ -20,7 +20,7 @@ from .core.engine import InspectionEngine
 from .core.multi_image_inspection import MultiImageInspectionEngine
 from .core.profile_manager import discover_profiles
 from .core.golden_profile_manager import (build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors,
-    _dynamic_item_rows, apply_editable_items, save_profile_identity_edits)
+    _dynamic_item_rows, apply_editable_items, save_profile_identity_edits, STANDARD_LIBRARY, validation_readiness_errors)
 from .core.camera_manager import CameraManager
 from .core.live_engine import LiveFrameAnalyzer, LOCK_TO_FIELD
 from .core.smart_lock import SmartLockEngine, IdentityGuard
@@ -148,7 +148,7 @@ class App(tk.Tk):
                     base_name=candidate; break
         base=self.profiles[base_name][1]
         try:
-            # V1.9.4: identity is generated ONLY from imported Golden metadata.
+            # V1.9.5: identity is generated ONLY from imported Golden metadata.
             # Do not ask for / seed a model-dependent profile name here.
             path,profile=build_dynamic_profile(source,base)
             identity_errors=dynamic_identity_errors(profile,path)
@@ -248,7 +248,7 @@ class App(tk.Tk):
 
         # ----- Visual Inspection Item Editor -----
         toolbar=ttk.Frame(checks_tab); toolbar.pack(fill='x',pady=(0,6))
-        ttk.Label(toolbar,text='Review auto-detected Golden items. Add/Edit/Delete here; no Python change or rebuild is required. Artwork requires a Golden template before Validate.').pack(side='left')
+        ttk.Label(toolbar,text='Golden items are listed first. Standard checks are added only when needed through Add Item > Standard Library. Unknown Golden items remain visible as Needs Review.').pack(side='left')
         checks_holder=ttk.Frame(checks_tab); checks_holder.pack(fill='both',expand=True)
         cols=('item','type','role','required','threshold','expected','origin')
         checks=ttk.Treeview(checks_holder,columns=cols,show='headings',selectmode='browse')
@@ -266,7 +266,7 @@ class App(tk.Tk):
             editable_rows=_dynamic_item_rows(working)
             for idx,row in enumerate(editable_rows):
                 checks.insert('', 'end', iid=str(idx), values=(row.get('item',''),row.get('type',''),row.get('role',''),
-                    'Yes' if row.get('required') else 'No',row.get('threshold',''),row.get('expected',''),row.get('origin','')))
+                    'Yes' if row.get('required') else 'No',row.get('threshold',''),row.get('expected',''),row.get('source',row.get('origin',''))))
 
         def item_editor(row=None,index=None):
             nonlocal editable_rows,working
@@ -276,7 +276,7 @@ class App(tk.Tk):
             item_v=tk.StringVar(value=row.get('item','')); type_v=tk.StringVar(value=row.get('type','Golden Text')); role_v=tk.StringVar(value=row.get('role','DETAIL'))
             req_v=tk.BooleanVar(value=bool(row.get('required',True))); thr_v=tk.StringVar(value=str(row.get('threshold',''))); exp_v=tk.StringVar(value=row.get('expected',''))
             ttk.Label(f,text='Inspection Item').grid(row=0,column=0,sticky='w',pady=4); ttk.Entry(f,textvariable=item_v,width=66).grid(row=0,column=1,sticky='ew',pady=4)
-            ttk.Label(f,text='Type').grid(row=1,column=0,sticky='w',pady=4); ttk.Combobox(f,textvariable=type_v,values=['Standard','Golden Text','Artwork'],state='readonly',width=22).grid(row=1,column=1,sticky='w',pady=4)
+            ttk.Label(f,text='Type').grid(row=1,column=0,sticky='w',pady=4); ttk.Combobox(f,textvariable=type_v,values=['Standard','Golden Text','Golden Variable','Golden Barcode','Golden QR','Golden Artwork','Golden Choice','Needs Review'],state='readonly',width=22).grid(row=1,column=1,sticky='w',pady=4)
             ttk.Label(f,text='Photo Role').grid(row=2,column=0,sticky='w',pady=4); ttk.Combobox(f,textvariable=role_v,values=['BASIC','WIFI','IDENTITY','COMPLIANCE','DETAIL'],state='readonly',width=22).grid(row=2,column=1,sticky='w',pady=4)
             ttk.Label(f,text='Required').grid(row=3,column=0,sticky='w',pady=4); ttk.Checkbutton(f,variable=req_v).grid(row=3,column=1,sticky='w',pady=4)
             ttk.Label(f,text='Threshold').grid(row=4,column=0,sticky='w',pady=4); ttk.Entry(f,textvariable=thr_v,width=18).grid(row=4,column=1,sticky='w',pady=4)
@@ -295,8 +295,12 @@ class App(tk.Tk):
                         threshold=tv
                     except Exception:
                         messagebox.showerror('Inspection Item','Threshold must be between 0 and 1.',parent=d); return
-                newrow={'item':item,'type':typ,'role':role_v.get().strip() or 'DETAIL','required':req_v.get(),
-                        'threshold':threshold,'expected':expected,'origin':'MANUAL_EDIT','manual_review_allowed':typ in ('Golden Text','Artwork')}
+                is_golden=(str(row.get('source','')).lower()=='golden' or str(row.get('origin',''))=='GOLDEN' or item.startswith('Golden #'))
+                newrow=dict(row)
+                newrow.update({'item':item,'type':typ,'role':role_v.get().strip() or 'DETAIL','required':req_v.get(),
+                        'threshold':threshold,'expected':expected,'origin':'GOLDEN' if is_golden else 'MANUAL_EDIT',
+                        'source':'Golden' if is_golden else 'Manual',
+                        'manual_review_allowed':typ in ('Golden Text','Golden Artwork','Golden Choice','Needs Review')})
                 rows=list(editable_rows)
                 if index is None: rows.append(newrow)
                 else: rows[index]=newrow
@@ -306,7 +310,37 @@ class App(tk.Tk):
             bf=ttk.Frame(f); bf.grid(row=7,column=0,columnspan=2,sticky='e',pady=(10,0))
             ttk.Button(bf,text='Apply',command=accept).pack(side='left',padx=4); ttk.Button(bf,text='Cancel',command=d.destroy).pack(side='left')
 
-        def add_item(): item_editor()
+        def add_standard_library():
+            nonlocal editable_rows,working
+            d=tk.Toplevel(win); d.title('Add from Standard Library'); d.transient(win); d.grab_set(); d.geometry('760x560')
+            f=ttk.Frame(d,padding=10); f.pack(fill='both',expand=True)
+            ttk.Label(f,text='Select existing Legacy CAM / Image checks to add. These checks use the already validated engine logic.').pack(anchor='w',pady=(0,6))
+            lb=tk.Listbox(f,selectmode='extended',font=('Segoe UI',10)); lb.pack(fill='both',expand=True)
+            for row in STANDARD_LIBRARY:
+                lb.insert('end',f"{row['label']}   [{row['item']}]")
+            def add_selected():
+                nonlocal editable_rows,working
+                sels=list(lb.curselection())
+                if not sels: return
+                rows=list(editable_rows); existing={r.get('item') for r in rows}
+                for i in sels:
+                    lib=STANDARD_LIBRARY[i]
+                    if lib['item'] in existing: continue
+                    rows.append({'item':lib['item'],'type':'Standard','role':lib['role'],'required':True,'threshold':'','expected':'',
+                                 'origin':'STANDARD_LIBRARY','source':'Standard Library','manual_review_allowed':False})
+                working=apply_editable_items(working,rows); refresh_checks(); refresh_summary(); refresh_json();
+                title_var.set(f"Profile: {working.get('profile_name',name)} | Status: DRAFT"); d.destroy()
+            b=ttk.Frame(f); b.pack(fill='x',pady=(8,0))
+            ttk.Button(b,text='Add Selected',command=add_selected).pack(side='right',padx=4)
+            ttk.Button(b,text='Cancel',command=d.destroy).pack(side='right')
+
+        def add_item():
+            d=tk.Toplevel(win); d.title('Add Inspection Item'); d.transient(win); d.grab_set(); d.resizable(False,False)
+            f=ttk.Frame(d,padding=14); f.pack(fill='both',expand=True)
+            ttk.Label(f,text='Choose how to add the inspection item:',font=('Segoe UI',10,'bold')).pack(anchor='w',pady=(0,10))
+            ttk.Button(f,text='From Standard Library / 既有檢查項目',width=42,command=lambda:(d.destroy(),add_standard_library())).pack(fill='x',pady=4)
+            ttk.Button(f,text='Custom Item / 自訂項目',width=42,command=lambda:(d.destroy(),item_editor())).pack(fill='x',pady=4)
+            ttk.Button(f,text='Cancel',command=d.destroy).pack(pady=(10,0))
         def edit_item():
             sel=checks.selection()
             if not sel: messagebox.showinfo('Edit Item','Select an inspection item first.',parent=win); return
@@ -340,7 +374,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.4'
+                working['profile_version']='1.9.5'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -374,7 +408,7 @@ class App(tk.Tk):
             messagebox.showinfo("Validate Profile","Select a profile first.")
             return
         path,data=self.profiles[name]
-        errors=validate_profile_structure(data,path)
+        errors=validate_profile_structure(data,path) + validation_readiness_errors(data)
         if errors:
             messagebox.showerror("Validate Profile","Profile cannot be validated:\n- " + "\n- ".join(errors))
             return
@@ -526,7 +560,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.4 Clean Dynamic Golden Profile + Visual Editor + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.5 Clean Dynamic Golden Profile + Visual Editor + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -1953,6 +1987,75 @@ class App(tk.Tk):
         try:self.image_manual_pass_btn.config(state=state); self.image_manual_refresh_btn.config(state="normal")
         except Exception:pass
 
+    def _manual_review_image_path(self, item: str) -> str:
+        """Resolve the best source photo for the selected evidence item."""
+        if self.multi_image_result is None:
+            return ''
+        ev=self.multi_image_result.evidence.get(item)
+        source=str(ev.source_image if ev else '')
+        for p in self.image_paths:
+            if os.path.basename(p) and os.path.basename(p) in source:
+                return p
+        return self.image_paths[0] if self.image_paths else ''
+
+    def _golden_review_image_path(self) -> str:
+        try:
+            profile=self.multi_image_engine.profile if self.multi_image_engine else {}
+            gi=(profile or {}).get('golden_import',{}) or {}
+            candidate=str(gi.get('candidate_layout_image',''))
+            if candidate and os.path.exists(candidate):
+                return candidate
+            asset=str(gi.get('asset_dir',''))
+            if asset and os.path.isdir(asset):
+                files=[]
+                for ext in ('*.png','*.jpg','*.jpeg','*.bmp','*.webp'):
+                    files.extend(pathlib.Path(asset).rglob(ext))
+                if files:
+                    return str(max(files,key=lambda x:x.stat().st_size))
+        except Exception:
+            pass
+        return ''
+
+    def _show_manual_golden_review(self, items: list[str], note: str):
+        """Golden-assisted human review without changing Legacy auto decisions."""
+        item=items[0]
+        actual_path=self._manual_review_image_path(item)
+        golden_path=self._golden_review_image_path()
+        win=tk.Toplevel(self); win.title('Manual Review - Actual vs Golden / 人工復判對照'); win.geometry('1320x760'); win.transient(self)
+        top=ttk.Frame(win,padding=8); top.pack(fill='x')
+        ttk.Label(top,text=f'Inspection Item: {item}',font=('Segoe UI',11,'bold')).pack(anchor='w')
+        ev=self.multi_image_result.evidence.get(item) if self.multi_image_result else None
+        ttk.Label(top,text=f"Automatic: {(ev.result if ev else 'NEED_MORE_IMAGE')}   |   Reason: {(ev.message if ev else '')}",foreground='#555').pack(anchor='w',pady=(3,0))
+        body=ttk.Frame(win,padding=8); body.pack(fill='both',expand=True)
+        left=ttk.LabelFrame(body,text='Actual / 實拍',padding=6); right=ttk.LabelFrame(body,text='Golden Reference / Golden 對照',padding=6)
+        left.pack(side='left',fill='both',expand=True,padx=(0,4)); right.pack(side='left',fill='both',expand=True,padx=(4,0))
+        photos=[]
+        def put_image(parent,path,empty):
+            if not path or not os.path.exists(path):
+                ttk.Label(parent,text=empty,anchor='center').pack(fill='both',expand=True); return
+            try:
+                im=Image.open(path).convert('RGB'); im.thumbnail((620,560),Image.Resampling.LANCZOS)
+                ph=ImageTk.PhotoImage(im); photos.append(ph)
+                ttk.Label(parent,image=ph,anchor='center').pack(fill='both',expand=True)
+                ttk.Label(parent,text=os.path.basename(path),foreground='#666').pack(anchor='center',pady=(4,0))
+            except Exception as exc:
+                ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
+        put_image(left,actual_path,'No evidence image is available for this item.')
+        put_image(right,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual PASS.')
+        win._review_photos=photos
+        buttons=ttk.Frame(win,padding=8); buttons.pack(fill='x')
+        ttk.Label(buttons,text=f'Note: {note}').pack(side='left')
+        def confirm_pass():
+            try:
+                self.multi_image_result=self.multi_image_engine.apply_manual_pass(self.multi_image_result,items,note)
+                self._render_multi_image_result(self.multi_image_result)
+                self.image_progress_var.set(f"Manual review saved | {len(items)} item(s) | {self.multi_image_result.overall}")
+                win.destroy()
+            except Exception as exc:
+                messagebox.showerror('Manual Review Error',str(exc),parent=win)
+        ttk.Button(buttons,text='Keep Auto Result / 保留自動判定',command=win.destroy).pack(side='right',padx=4)
+        ttk.Button(buttons,text='Confirm PASS / 人工確認PASS',command=confirm_pass).pack(side='right',padx=4)
+
     def manual_review_selected(self):
         if self.image_job_running:
             messagebox.showinfo("Manual Review","Wait for image inspection to finish first."); return
@@ -1964,14 +2067,10 @@ class App(tk.Tk):
         items=[self._manual_review_items[i] for i in sels if i < len(self._manual_review_items)]
         if not items:return
         note=(self.image_manual_note_var.get() or "Visual inspection confirmed").strip()
-        msg="Confirm manual PASS for:\n\n"+"\n".join(f"• {x}" for x in items)+f"\n\nNote: {note}\n\nAutomatic result will be preserved in logs/report."
-        if not messagebox.askyesno("Manual Visual Review",msg):return
-        try:
-            self.multi_image_result=self.multi_image_engine.apply_manual_pass(self.multi_image_result,items,note)
-            self._render_multi_image_result(self.multi_image_result)
-            self.image_progress_var.set(f"Manual review saved | {len(items)} item(s) | {self.multi_image_result.overall}")
-        except Exception as exc:
-            messagebox.showerror("Manual Review Error",str(exc))
+        # V1.9.5: show actual evidence and Golden reference before the operator
+        # decides. Automatic evidence/result remains unchanged unless PASS is
+        # explicitly confirmed.
+        self._show_manual_golden_review(items,note)
 
     def _set_image_controls_busy(self, busy: bool):
         self.image_job_running=bool(busy)
@@ -2081,7 +2180,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.4 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.5 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.
