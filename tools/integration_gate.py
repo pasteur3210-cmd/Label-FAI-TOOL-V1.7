@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.9 integration gate.
+"""V1.9.11 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -25,6 +25,7 @@ from label_tool.core.golden_profile_manager import (
 from label_tool.core.parser import merge_fields
 from label_tool.core.profile_manager import _display_name
 from label_tool.core.rules import validate
+from label_tool.core.multi_image_inspection import MultiImageInspectionEngine, MultiImageResult
 
 GOLDEN = '''
 Chassis Label Request Form
@@ -67,6 +68,8 @@ def main() -> int:
     check([r['form_no'] for r in rows] == list(range(1, 20)), 'Golden numbered items 1..19 are incomplete')
     qr = next(r for r in rows if r['form_no'] == 19)
     check(qr['type'] == 'Golden QR', 'QR item is not classified as Golden QR')
+    check(bool(qr.get('presence_item')), 'Golden QR has no mandatory presence/review item')
+    check(all(bool(r.get('presence_item')) for r in rows if r.get('type')=='Golden Barcode'), 'Golden Barcode item can bypass presence/review')
     ce = next(r for r in rows if r['form_no'] == 4)
     check(ce['required'] is False, 'CE ■ No checkbox did not remain Not Required')
 
@@ -93,6 +96,7 @@ def main() -> int:
     check('Variable: WiFi QR Format' in profile['live']['required_items'], 'Golden QR did not map to runtime QR check')
     check('Variable: S/N Barcode Format' in profile['live']['required_items'], 'Golden S/N did not map to runtime barcode check')
     check('Variable: MAC Barcode Format' in profile['live']['required_items'], 'Golden MAC did not map to runtime barcode check')
+    check(qr['presence_item'] in profile['live']['required_items'], 'Golden QR mandatory presence item was dropped')
 
     # 3) Dynamic parser replay of the real field pattern from the reported run.
     profile['rules']['pn_regex'] = r'[0-9A-Z-]{5,32}'
@@ -109,6 +113,8 @@ def main() -> int:
     check(fields.get('pn') == '740114-001', 'P/N was not parsed dynamically')
     check(fields.get('mac_barcode') == 'A01842EA8609', 'Spurious MAC barcode candidate overrode the human-matching candidate')
     check(fields.get('qr_wifi_key') == 'KAG7dcsyJ7', 'QR WiFi Key was not parsed')
+    check(fields.get('qr_sn') == '2638043UXXF-AN000038', 'QR S/N was not normalized')
+    check(fields.get('qr_mac') == 'A01842EA8609', 'QR MAC was not normalized')
 
     result = {x.name: x for x in validate(fields, profile, {'pn': '740114-001', 'made_in': 'Taiwan'})}
     for name in ('Fixed: model', 'Variable: P/N Format', 'Variable: S/N Human Readable Format',
@@ -117,6 +123,17 @@ def main() -> int:
                  'Consistency: MAC Text vs Barcode', 'Variable: SSID Format',
                  'Variable: WiFi Key Format', 'Variable: WiFi QR Format'):
         check(name in result and result[name].status == 'PASS', f'Runtime replay failed: {name}')
+
+    # Field-record regression: session fusion must preserve normalized QR S/N +
+    # MAC facts and must not turn a single-image QR PASS into a conflict.
+    fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.11')
+    mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
+    mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
+    best={}; conflicts={}
+    fusion._merge_session_rules(mr,{},best,conflicts)
+    check(not conflicts, 'QR session fusion created a conflict from already normalized QR evidence')
+    check(best.get('Variable: WiFi QR Format') and best['Variable: WiFi QR Format'].result=='PASS', 'QR session fusion did not stay PASS')
 
     # 4) Same model, different Golden P/N must have distinct UI keys.
     a = {'profile_name': 'VG-8043u Chassis Label', 'dynamic_profile': True, 'label_pn': '680010-367'}
@@ -140,6 +157,11 @@ def main() -> int:
         check(token in app, f'Manual Golden review/operator-attention wiring missing: {token}')
     for token in ('manual_attention_mode', 'manual_reviews', 'record_manual_review_action'):
         check(token in mi, f'Manual review traceability core missing: {token}')
+    for token in ('_golden_review_region', 'machine_codes', 'image_ocr_results', 'crop_box=golden_crop'):
+        check(token in app, f'Item-aware Golden focus is missing: {token}')
+    check('if role == "FULL" and not self.profile.get("dynamic_profile"):' in mi, 'Dynamic FULL path can still execute Legacy seed inspection')
+    check('direct_rows=[r for r in direct_rows if r.name in dynamic_required]' in mi, 'Dynamic evidence is not filtered to current Profile requirements')
+    check('"qr_sn", "qr_mac"' in mi, 'QR normalized S/N/MAC facts are not persisted into session fusion')
 
     # 7) Profile/Golden switch must clear rendered Image evidence so an old
     # session cannot be reviewed under a newly loaded Golden.
@@ -156,8 +178,9 @@ def main() -> int:
     # Golden-assisted Manual Review.
     gp=(ROOT/'label_tool/core/golden_profile_manager.py').read_text(encoding='utf-8')
     check('__incoming_' in gp and 'backup=root.parent' in gp, 'Transactional Golden asset replacement guard missing')
+    check('_detect_golden_machine_codes' in gp and 'Golden Machine Code:' in gp, 'Golden Barcode/QR non-bypass detector is missing')
 
-    print('[INTEGRATION_GATE][PASS] Golden completeness, dynamic runtime, unique profile identity, all-non-PASS review, stale-Golden isolation')
+    print('[INTEGRATION_GATE][PASS] Golden completeness, barcode/QR non-bypass, dynamic isolation, QR fusion, item-aware review, stale-Golden isolation')
     return 0
 
 
