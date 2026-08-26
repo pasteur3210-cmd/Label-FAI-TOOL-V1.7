@@ -385,7 +385,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.11'
+                working['profile_version']='1.9.12'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -571,7 +571,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.11 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.12 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -2061,7 +2061,7 @@ class App(tk.Tk):
     def _golden_review_region(self, item: str):
         """Return (image_path, crop_box, description) for the selected item.
 
-        V1.9.11 uses Golden import metadata to focus QR/barcodes and OCR text.
+        V1.9.12 uses strict type-safe Golden mapping: Artwork defaults to the full Golden unless an explicit verified Artwork ROI exists; QR/barcodes and Golden text may use their own typed ROIs.
         If an ROI cannot be mapped, the caller shows the whole Golden and
         clearly tells the operator that no automatic ROI was available.
         """
@@ -2079,6 +2079,34 @@ class App(tk.Tk):
             ev=self.multi_image_result.evidence.get(item) if self.multi_image_result else None
             actual=str(ev.actual if ev else '')
             typ=str((row or {}).get('type',''))
+
+            # V1.9.12 safety rule: Artwork must NEVER borrow an OCR-text ROI.
+            # Imported Word/DOCX Golden files often provide a whole-label example
+            # but no verified per-artwork coordinates. In that case the safest
+            # operator reference is the complete Golden label. A wrong crop is
+            # worse than a full-image fallback because it can mislead manual
+            # review (e.g. COMTREND Logo previously focused on WiFi/SSID text).
+            # Artwork focus is allowed only when a future profile explicitly
+            # provides a verified artwork_review_roi.
+            is_artwork=(typ=='Golden Artwork' or str(item).startswith('Artwork: '))
+            if is_artwork:
+                explicit=(row or {}).get('artwork_review_roi')
+                if isinstance(explicit,(list,tuple)) and len(explicit)==4 and path:
+                    try:
+                        with Image.open(path) as im:
+                            vals=[float(x) for x in explicit]
+                            # Accept normalized [0..1] ROI or absolute pixels.
+                            if all(0.0 <= x <= 1.0 for x in vals):
+                                x1,y1,x2,y2=vals
+                                box=(int(x1*im.width),int(y1*im.height),int(x2*im.width),int(y2*im.height))
+                            else:
+                                box=tuple(int(x) for x in vals)
+                            if box[2]>box[0] and box[3]>box[1]:
+                                return path,box,'Verified Artwork ROI from Golden Profile'
+                    except Exception:
+                        pass
+                return path,None,'Artwork review: showing full Golden image (no verified Artwork ROI)'
+
             # Machine codes have deterministic polygons from Golden import.
             if typ in ('Golden QR','Golden Barcode') or 'QR' in item.upper() or 'BARCODE' in item.upper():
                 want='QR' if (typ=='Golden QR' or 'QR' in item.upper()) else 'BARCODE'
@@ -2134,7 +2162,7 @@ class App(tk.Tk):
     def _show_manual_golden_review(self, items: list[str], note: str):
         """Golden-assisted review for one non-PASS item.
 
-        V1.9.11 UI safety rules:
+        V1.9.12 UI safety rules:
         - Action buttons are placed above the image comparison area, so the
           Windows taskbar can never cover the only decision controls.
         - The popup size is calculated from the current screen instead of a
@@ -2186,7 +2214,7 @@ class App(tk.Tk):
         if mode=='REVIEW_ONLY':
             ttk.Label(top,text='REVIEW ONLY：此項為身分/條碼/一致性資料，可人工確認或要求重讀，但不可用單次目視直接覆寫成 PASS。',foreground='#A00000').pack(anchor='w',pady=(3,0))
 
-        # V1.9.11: keep the decision bar permanently visible ABOVE the images.
+        # V1.9.12: keep the decision bar permanently visible ABOVE the images.
         actions=ttk.Frame(win,padding=(8,4)); actions.pack(fill='x')
         ttk.Label(actions,text=f'Note: {note}',foreground='#444').pack(side='left',padx=(0,8))
 
@@ -2230,7 +2258,7 @@ class App(tk.Tk):
         left.pack(side='left',fill='both',expand=True,padx=(0,4)); right.pack(side='left',fill='both',expand=True,padx=(4,0))
         photos=[]
         max_img_w=max(380,(target_w-70)//2)
-        max_img_h=max(260,target_h-265)
+        max_img_h=max(260,target_h-300)
         def put_image(parent,path,empty,crop_box=None,caption=''):
             if not path or not os.path.exists(path):
                 ttk.Label(parent,text=empty,anchor='center',wraplength=max_img_w-30).pack(fill='both',expand=True); return
@@ -2246,7 +2274,26 @@ class App(tk.Tk):
             except Exception as exc:
                 ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
         put_image(left,actual_path,'No evidence image is available for this item.',caption=os.path.basename(actual_path) if actual_path else '')
-        put_image(right,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual decision.',crop_box=golden_crop,caption=golden_focus_note)
+
+        # V1.9.12: the operator always starts from the COMPLETE Golden label.
+        # A typed/verified focus crop is an optional aid, never the only
+        # reference. This prevents an incorrect ROI mapping from misleading a
+        # factory manual decision.
+        golden_controls=ttk.Frame(right); golden_controls.pack(fill='x',pady=(0,4))
+        golden_view=ttk.Frame(right); golden_view.pack(fill='both',expand=True)
+
+        def render_golden(crop_box=None,caption=''):
+            for child in golden_view.winfo_children():
+                child.destroy()
+            put_image(golden_view,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual decision.',crop_box=crop_box,caption=caption)
+
+        ttk.Button(golden_controls,text='Full Golden / 完整Golden',command=lambda:render_golden(None,'Full Golden reference')).pack(side='left',padx=(0,4))
+        focus_btn=ttk.Button(golden_controls,text='Focus Item / 項目放大',command=lambda:render_golden(golden_crop,golden_focus_note))
+        focus_btn.pack(side='left')
+        if not golden_crop:
+            focus_btn.config(state='disabled')
+        ttk.Label(golden_controls,text=golden_focus_note,foreground='#666',wraplength=max_img_w-190).pack(side='left',padx=(8,0))
+        render_golden(None,'Full Golden reference')
         win._review_photos=photos
 
     def manual_review_selected(self):
@@ -2374,7 +2421,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.11 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.12 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.
