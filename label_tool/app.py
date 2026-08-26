@@ -385,7 +385,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.9'
+                working['profile_version']='1.9.11'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -571,7 +571,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.9 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.11 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -2058,49 +2058,138 @@ class App(tk.Tk):
             pass
         return ''
 
+    def _golden_review_region(self, item: str):
+        """Return (image_path, crop_box, description) for the selected item.
+
+        V1.9.11 uses Golden import metadata to focus QR/barcodes and OCR text.
+        If an ROI cannot be mapped, the caller shows the whole Golden and
+        clearly tells the operator that no automatic ROI was available.
+        """
+        path=self._golden_review_image_path()
+        try:
+            profile=self.multi_image_engine.profile if self.multi_image_engine else {}
+            gi=(profile or {}).get('golden_import',{}) or {}
+            rows=(profile or {}).get('golden_form_items',[]) or []
+            row=None
+            for r in rows:
+                if not isinstance(r,dict):
+                    continue
+                if item==str(r.get('item','')) or item==str(r.get('presence_item','')) or item in [str(x) for x in (r.get('engine_items',[]) or [])]:
+                    row=r; break
+            ev=self.multi_image_result.evidence.get(item) if self.multi_image_result else None
+            actual=str(ev.actual if ev else '')
+            typ=str((row or {}).get('type',''))
+            # Machine codes have deterministic polygons from Golden import.
+            if typ in ('Golden QR','Golden Barcode') or 'QR' in item.upper() or 'BARCODE' in item.upper():
+                want='QR' if (typ=='Golden QR' or 'QR' in item.upper()) else 'BARCODE'
+                codes=[c for c in (gi.get('machine_codes',[]) or []) if str(c.get('kind','')).upper()==want]
+                if actual:
+                    exact=[c for c in codes if str(c.get('text','')) and (str(c.get('text','')) in actual or actual in str(c.get('text','')))]
+                    if exact: codes=exact
+                if codes:
+                    c=codes[0]; cpath=str(c.get('file','') or path)
+                    pts=c.get('points',[]) or []
+                    if len(pts)>=2:
+                        xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
+                        try:
+                            with Image.open(cpath) as im:
+                                pad=max(20,int(min(im.size)*0.03))
+                                box=(max(0,int(min(xs))-pad),max(0,int(min(ys))-pad),min(im.width,int(max(xs))+pad),min(im.height,int(max(ys))+pad))
+                            return cpath,box,f'{want} ROI from imported Golden'
+                        except Exception:
+                            pass
+            # Text fields: use OCR line boxes captured when the Golden was imported.
+            target=' '.join(str(x) for x in ((row or {}).get('expected',''),(row or {}).get('raw_text',''),item) if x).strip()
+            if target:
+                import difflib
+                def norm(v):
+                    return ' '.join(re.sub(r'[^a-z0-9]+',' ',str(v or '').lower()).split())
+                nt=norm(target); target_tokens=set(nt.split())
+                best=None
+                for ocr in gi.get('image_ocr_results',[]) or []:
+                    opath=str(ocr.get('file','') or '')
+                    for line in ocr.get('lines',[]) or []:
+                        txt=str(line.get('text','') or ''); nl=norm(txt)
+                        if not nl: continue
+                        seq=difflib.SequenceMatcher(None,nt,nl).ratio() if nt else 0.0
+                        toks=set(nl.split()); overlap=(len(target_tokens & toks)/max(1,len(target_tokens))) if target_tokens else 0.0
+                        score=max(seq,overlap)
+                        if best is None or score>best[0]:
+                            best=(score,opath,line)
+                if best and best[0]>=0.25:
+                    _,opath,line=best; pts=line.get('box',[]) or []
+                    if len(pts)>=2 and opath:
+                        xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
+                        try:
+                            with Image.open(opath) as im:
+                                padx=max(40,int(im.width*0.08)); pady=max(30,int(im.height*0.06))
+                                box=(max(0,int(min(xs))-padx),max(0,int(min(ys))-pady),min(im.width,int(max(xs))+padx),min(im.height,int(max(ys))+pady))
+                            return opath,box,f'Golden OCR focus: {line.get("text","")}'
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return path,None,'Golden ROI not mapped; showing full Golden image'
+
     def _show_manual_golden_review(self, items: list[str], note: str):
         """Golden-assisted review for one non-PASS item.
 
-        Every non-PASS item can be inspected here. Only items explicitly
-        classified OVERRIDE_ALLOWED expose Confirm PASS; traceability items
-        remain REVIEW_ONLY and can be logged/kept/rechecked without silently
-        changing machine identity data.
+        V1.9.11 UI safety rules:
+        - Action buttons are placed above the image comparison area, so the
+          Windows taskbar can never cover the only decision controls.
+        - The popup size is calculated from the current screen instead of a
+          fixed 1320x790 geometry.
+        - Confirm PASS is always visible. REVIEW_ONLY items show the button in
+          disabled state instead of hiding it, so the operator understands why
+          a PASS override is unavailable.
         """
         item=items[0]
         mode=self.multi_image_engine.manual_attention_mode(item)
         actual_path=self._manual_review_image_path(item)
-        golden_path=self._golden_review_image_path()
-        win=tk.Toplevel(self); win.title('Manual Review - Actual vs Golden / 人工復判對照'); win.geometry('1320x790'); win.transient(self)
-        top=ttk.Frame(win,padding=8); top.pack(fill='x')
+        golden_path,golden_crop,golden_focus_note=self._golden_review_region(item)
+
+        win=tk.Toplevel(self)
+        win.title('Manual Review - Actual vs Golden / 人工復判對照')
+        win.transient(self)
+        win.update_idletasks()
+        sw=max(1024, int(win.winfo_screenwidth() or 1366))
+        sh=max(700, int(win.winfo_screenheight() or 768))
+        # On Windows use the real desktop WORK AREA (taskbar excluded). This
+        # also behaves correctly with display scaling and a non-bottom taskbar.
+        work_x=0; work_y=0; work_w=sw; work_h=sh
+        try:
+            if os.name=='nt':
+                import ctypes
+                from ctypes import wintypes
+                rect=wintypes.RECT()
+                if ctypes.windll.user32.SystemParametersInfoW(0x0030,0,ctypes.byref(rect),0):  # SPI_GETWORKAREA
+                    work_x=int(rect.left); work_y=int(rect.top)
+                    work_w=max(800,int(rect.right-rect.left)); work_h=max(560,int(rect.bottom-rect.top))
+        except Exception:
+            pass
+        target_w=min(1500, max(900, work_w-40))
+        target_h=min(920, max(560, work_h-40))
+        x=work_x+max(0,(work_w-target_w)//2)
+        y=work_y+max(0,(work_h-target_h)//2)
+        win.geometry(f'{target_w}x{target_h}+{x}+{y}')
+        win.minsize(min(980,target_w), min(620,target_h))
+
+        top=ttk.Frame(win,padding=(8,6)); top.pack(fill='x')
         ttk.Label(top,text=f'Inspection Item: {item}',font=('Segoe UI',11,'bold')).pack(anchor='w')
         ev=self.multi_image_result.evidence.get(item) if self.multi_image_result else None
         auto='CONFLICT' if (self.multi_image_result and item in self.multi_image_result.conflicts) else (ev.result if ev else 'NEED_MORE_IMAGE')
         actual=(ev.actual if ev else '')
         expected=(ev.expected if ev else '')
-        ttk.Label(top,text=f"Mode: {mode}   |   Automatic: {auto}",foreground=('#8A5A00' if mode=='REVIEW_ONLY' else '#006400')).pack(anchor='w',pady=(3,0))
-        ttk.Label(top,text=f"Actual: {actual or '-'}   |   Expected: {expected or '-'}",foreground='#444').pack(anchor='w',pady=(2,0))
-        ttk.Label(top,text=f"Reason: {(ev.message if ev else 'No usable evidence')}",foreground='#555',wraplength=1260).pack(anchor='w',pady=(2,0))
+        ttk.Label(top,text=f"Mode: {mode}   |   Automatic: {auto}",foreground=('#8A5A00' if mode=='REVIEW_ONLY' else '#006400')).pack(anchor='w',pady=(2,0))
+        ttk.Label(top,text=f"Actual: {actual or '-'}   |   Expected: {expected or '-'}",foreground='#444',wraplength=max(760,target_w-50)).pack(anchor='w',pady=(1,0))
+        ttk.Label(top,text=f"Reason: {(ev.message if ev else 'No usable evidence')}",foreground='#555',wraplength=max(760,target_w-50)).pack(anchor='w',pady=(1,0))
         if mode=='REVIEW_ONLY':
-            ttk.Label(top,text='REVIEW ONLY: this item is identity/barcode/consistency data and cannot be changed to PASS by a single visual click.',foreground='#A00000').pack(anchor='w',pady=(4,0))
-        body=ttk.Frame(win,padding=8); body.pack(fill='both',expand=True)
-        left=ttk.LabelFrame(body,text='Actual / 實拍',padding=6); right=ttk.LabelFrame(body,text='Golden Reference / Golden 對照',padding=6)
-        left.pack(side='left',fill='both',expand=True,padx=(0,4)); right.pack(side='left',fill='both',expand=True,padx=(4,0))
-        photos=[]
-        def put_image(parent,path,empty):
-            if not path or not os.path.exists(path):
-                ttk.Label(parent,text=empty,anchor='center',wraplength=560).pack(fill='both',expand=True); return
-            try:
-                im=Image.open(path).convert('RGB'); im.thumbnail((620,560),Image.Resampling.LANCZOS)
-                ph=ImageTk.PhotoImage(im); photos.append(ph)
-                ttk.Label(parent,image=ph,anchor='center').pack(fill='both',expand=True)
-                ttk.Label(parent,text=os.path.basename(path),foreground='#666').pack(anchor='center',pady=(4,0))
-            except Exception as exc:
-                ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
-        put_image(left,actual_path,'No evidence image is available for this item.')
-        put_image(right,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual decision.')
-        win._review_photos=photos
-        buttons=ttk.Frame(win,padding=8); buttons.pack(fill='x')
-        ttk.Label(buttons,text=f'Note: {note}').pack(side='left')
+            ttk.Label(top,text='REVIEW ONLY：此項為身分/條碼/一致性資料，可人工確認或要求重讀，但不可用單次目視直接覆寫成 PASS。',foreground='#A00000').pack(anchor='w',pady=(3,0))
+
+        # V1.9.11: keep the decision bar permanently visible ABOVE the images.
+        actions=ttk.Frame(win,padding=(8,4)); actions.pack(fill='x')
+        ttk.Label(actions,text=f'Note: {note}',foreground='#444').pack(side='left',padx=(0,8))
+
         def save_action(action):
             try:
                 self.multi_image_result=self.multi_image_engine.record_manual_review_action(self.multi_image_result,item,action,note)
@@ -2109,6 +2198,7 @@ class App(tk.Tk):
                 win.destroy()
             except Exception as exc:
                 messagebox.showerror('Manual Review Error',str(exc),parent=win)
+
         def confirm_pass():
             try:
                 self.multi_image_result=self.multi_image_engine.apply_manual_pass(self.multi_image_result,[item],note)
@@ -2124,11 +2214,40 @@ class App(tk.Tk):
                 win.destroy()
             except Exception as exc:
                 messagebox.showerror('Manual Review Error',str(exc),parent=win)
-        ttk.Button(buttons,text='Keep Auto / 保留自動判定',command=lambda:save_action('KEEP_AUTO')).pack(side='right',padx=4)
-        ttk.Button(buttons,text='Confirm FAIL / 人工確認FAIL',command=lambda:save_action('CONFIRM_FAIL')).pack(side='right',padx=4)
-        ttk.Button(buttons,text='Recheck / 重新辨識',command=lambda:(save_action('REQUEST_RECHECK'), self.after(100,self.recheck_unresolved))).pack(side='right',padx=4)
-        if mode=='OVERRIDE_ALLOWED':
-            ttk.Button(buttons,text='Confirm PASS / 人工確認PASS',command=confirm_pass).pack(side='right',padx=4)
+
+        # Reverse pack order is intentional: these remain visible even when the
+        # comparison images are tall or Windows display scaling is >100%.
+        ttk.Button(actions,text='Keep Auto / 保留自動判定',command=lambda:save_action('KEEP_AUTO')).pack(side='right',padx=3)
+        ttk.Button(actions,text='Confirm FAIL / 人工確認FAIL',command=lambda:save_action('CONFIRM_FAIL')).pack(side='right',padx=3)
+        ttk.Button(actions,text='Recheck / 重新辨識',command=lambda:(save_action('REQUEST_RECHECK'), self.after(100,self.recheck_unresolved))).pack(side='right',padx=3)
+        pass_btn=ttk.Button(actions,text='Confirm PASS / 人工確認PASS',command=confirm_pass)
+        pass_btn.pack(side='right',padx=3)
+        if mode!='OVERRIDE_ALLOWED':
+            pass_btn.config(state='disabled')
+
+        body=ttk.Frame(win,padding=(8,4,8,8)); body.pack(fill='both',expand=True)
+        left=ttk.LabelFrame(body,text='Actual / 實拍',padding=6); right=ttk.LabelFrame(body,text='Golden Reference / Golden 對照',padding=6)
+        left.pack(side='left',fill='both',expand=True,padx=(0,4)); right.pack(side='left',fill='both',expand=True,padx=(4,0))
+        photos=[]
+        max_img_w=max(380,(target_w-70)//2)
+        max_img_h=max(260,target_h-265)
+        def put_image(parent,path,empty,crop_box=None,caption=''):
+            if not path or not os.path.exists(path):
+                ttk.Label(parent,text=empty,anchor='center',wraplength=max_img_w-30).pack(fill='both',expand=True); return
+            try:
+                im=Image.open(path).convert('RGB')
+                if crop_box:
+                    try: im=im.crop(crop_box)
+                    except Exception: pass
+                im.thumbnail((max_img_w,max_img_h),Image.Resampling.LANCZOS)
+                ph=ImageTk.PhotoImage(im); photos.append(ph)
+                ttk.Label(parent,image=ph,anchor='center').pack(fill='both',expand=True)
+                ttk.Label(parent,text=caption or os.path.basename(path),foreground='#666',wraplength=max_img_w-20).pack(anchor='center',pady=(3,0))
+            except Exception as exc:
+                ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
+        put_image(left,actual_path,'No evidence image is available for this item.',caption=os.path.basename(actual_path) if actual_path else '')
+        put_image(right,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual decision.',crop_box=golden_crop,caption=golden_focus_note)
+        win._review_photos=photos
 
     def manual_review_selected(self):
         if self.image_job_running:
@@ -2255,7 +2374,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.9 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.11 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

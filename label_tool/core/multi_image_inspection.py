@@ -83,7 +83,7 @@ ROLE_ITEMS_INNER = {
 RAW_FIELD_KEYS = [
     "model", "ip", "username", "pn", "made_in", "password", "wifi_key", "ssid",
     "sn_text", "sn_barcode", "mac_text", "mac_barcode", "gpon_sn_text", "gpon_sn_barcode",
-    "wifi_qr", "qr_ssid", "qr_wifi_key", "has_gateway_text", "has_input_text", "has_usb_text",
+    "wifi_qr", "qr_sn", "qr_mac", "qr_ssid", "qr_wifi_key", "has_gateway_text", "has_input_text", "has_usb_text",
     "has_comtrend_address", "has_laser_text",
 ]
 
@@ -582,9 +582,21 @@ class MultiImageInspectionEngine:
             expected=str(cfg.get("text","") or "")
             threshold=float(cfg.get("threshold",0.74) or 0.74)
             score,best=best_line_similarity(raw_text or "",expected)
-            if score >= threshold:
-                rows.append(FieldResult(name=item,actual=best or "Present",expected=expected,status="PASS",
-                    message=f"Dynamic Golden text similarity={score:.3f} threshold={threshold:.3f}",error_code=""))
+            # Controlled Golden forms often describe a field as
+            # "Product: Home Gateway" while the printed label OCR returns
+            # "COMTREND Home Gateway".  Exact normalized containment/token
+            # coverage is stronger evidence than whole-line fuzzy similarity.
+            def _norm_text(v):
+                return re.sub(r"[^a-z0-9]+"," ",str(v or "").lower()).strip()
+            exp_norm=_norm_text(expected)
+            raw_norm=_norm_text(raw_text)
+            exp_tokens=[x for x in exp_norm.split() if len(x)>1 and x not in {"product","required","input","type"}]
+            containment=bool(exp_norm and exp_norm in raw_norm)
+            token_hit=bool(exp_tokens and all(tok in raw_norm.split() for tok in exp_tokens))
+            if containment or token_hit or score >= threshold:
+                method="containment" if containment else ("token" if token_hit else "fuzzy")
+                rows.append(FieldResult(name=item,actual=best or expected or "Present",expected=expected,status="PASS",
+                    message=f"Dynamic Golden text {method} match similarity={score:.3f} threshold={threshold:.3f}",error_code=""))
             elif best:
                 rows.append(FieldResult(name=item,actual=best,expected=expected,status="WARN",
                     message=f"Dynamic Golden text needs clearer image similarity={score:.3f} threshold={threshold:.3f}",error_code="DYN-TEXT-VERIFY"))
@@ -630,13 +642,51 @@ class MultiImageInspectionEngine:
         direct_quality_ok = self._sharpness(image) >= 18.0 and self._contrast(image) >= 8.0
         direct_rows = validate(direct_fields, self.profile, expected_work_order=expected or {})
         direct_rows.extend(self._dynamic_rows(raw_text))
+        # Dynamic Golden hard rule: every required Barcode / QR item has a
+        # presence path even when the controlled document does not define a
+        # payload/format rule. Unknown semantics become operator-reviewable;
+        # they are never silently bypassed.
+        if self.profile.get("dynamic_profile"):
+            formats=[str(getattr(x,"format","") or "").upper() for x in _decoded]
+            texts=[str(getattr(x,"text","") or "") for x in _decoded]
+            has_qr=any("QR" in f for f in formats)
+            has_barcode=any(f and "QR" not in f for f in formats)
+            for cfg in self.profile.get("golden_form_items",[]) or []:
+                if not cfg.get("required",False):
+                    continue
+                typ=str(cfg.get("type","") or "")
+                presence=str(cfg.get("presence_item","") or "")
+                if not presence:
+                    continue
+                if typ=="Golden QR":
+                    ok=has_qr
+                    actual=next((t for f,t in zip(formats,texts) if "QR" in f),"")
+                    expected_text="QR code present / decodable; payload rule may require manual review"
+                elif typ=="Golden Barcode":
+                    ok=has_barcode
+                    actual=next((t for f,t in zip(formats,texts) if f and "QR" not in f),"")
+                    expected_text="Barcode present / decodable; content rule may require manual review"
+                else:
+                    continue
+                direct_rows.append(FieldResult(
+                    name=presence, actual=actual or ("Present" if ok else ""), expected=expected_text,
+                    status="PASS" if ok else "WARN",
+                    message="Golden machine-code presence check" if ok else "Required Golden machine code was not decoded; operator review or clearer image required",
+                    error_code="" if ok else "GOLDEN-CODE-REVIEW"
+                ))
+            # Prevent seed/Legacy rows emitted by generic validate() from even
+            # entering Dynamic evidence/debug logs.  Only the imported Golden
+            # plus explicitly added Standard Library requirements may survive.
+            dynamic_required=set(self._required_items())
+            direct_rows=[r for r in direct_rows if r.name in dynamic_required]
 
-        if role == "FULL":
-            # The overview still uses the established whole-label engine because
-            # it supplies layout/position evidence and legacy ROI evidence.
+        if role == "FULL" and not self.profile.get("dynamic_profile"):
+            # Bundled Legacy profiles keep their established whole-label engine.
+            # Dynamic Golden profiles must NOT execute a seed model's fixed ROI/
+            # model-specific checks; their inspection content comes only from the
+            # imported Golden + explicitly-added Standard Library items.
             one = self.base.inspect(image_path, str(per_root), expected)
             rows_by_name = {r.name: r for r in one.fields}
-            # V1.8.0: targeted rescue for the visually obvious GPON phrase.
             label_type = str(self.profile.get("label_type", "")).lower()
             gateway_roi = [0.04, 0.12, 0.46, 0.22] if "chassis" in label_type else [0.01, 0.14, 0.43, 0.29]
             self._rescue_fixed_phrase(

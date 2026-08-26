@@ -199,10 +199,58 @@ def _ocr_golden_images(images: list[Path]) -> tuple[str, list[dict]]:
             text,structured=engine.read(image)
             if text.strip():
                 texts.append(text.strip())
-                rows.append({'file':str(img_path),'line_count':len(structured),'text':text.strip()})
+                line_rows=[]
+                for box,txt,score in structured:
+                    try:
+                        pts=[[float(pt[0]),float(pt[1])] for pt in box]
+                    except Exception:
+                        pts=[]
+                    line_rows.append({'text':str(txt),'score':float(score),'box':pts})
+                rows.append({'file':str(img_path),'line_count':len(structured),'text':text.strip(),'lines':line_rows})
         except Exception as exc:
             rows.append({'file':str(img_path),'line_count':0,'error':repr(exc),'text':''})
     return '\n'.join(texts), rows
+
+def _detect_golden_machine_codes(images: list[Path]) -> list[dict]:
+    """Decode QR/barcodes embedded in the Golden example image.
+
+    This is best-effort and non-fatal, but when codes are found their type and
+    polygon are persisted so Profile completeness and Manual Review can use
+    them even if the request-form prose does not explain the payload.
+    """
+    if not images:
+        return []
+    try:
+        import cv2
+        import numpy as np
+        from .decoder import decode_codes
+    except Exception:
+        return []
+    out=[]; seen=set()
+    for img_path in sorted((p for p in images if p.exists()), key=lambda p:p.stat().st_size, reverse=True)[:4]:
+        try:
+            arr=np.fromfile(str(img_path),dtype=np.uint8)
+            image=cv2.imdecode(arr,cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+            for d in decode_codes(image):
+                fmt=str(getattr(d,'format','') or '')
+                txt=str(getattr(d,'text','') or '')
+                kind='QR' if 'QR' in fmt.upper() else 'BARCODE'
+                key=(kind,fmt,txt)
+                if key in seen:
+                    continue
+                seen.add(key)
+                pts=[]
+                try:
+                    pts=[[int(x),int(y)] for x,y in (getattr(d,'points',None) or [])]
+                except Exception:
+                    pts=[]
+                out.append({'file':str(img_path),'kind':kind,'format':fmt,'text':txt,'points':pts})
+        except Exception:
+            continue
+    return out
+
 
 def _largest_image(images: list[Path]) -> Path|None:
     if not images: return None
@@ -318,15 +366,23 @@ def _classify_form_item(no: int, body: str) -> dict:
     elif 'made in' in low:
         typ='Golden Choice'; role='COMPLIANCE'; mapping=['Variable: Made in Format']
     elif any(k in low for k in ('input','usb ','encryption type','product')):
-        typ='Golden Text'; role='BASIC'; expected=t
+        typ='Golden Text'; role='BASIC'
+        expected=(re.split(r'[:：]',t,maxsplit=1)[1].strip() if re.search(r'[:：]',t) else t)
     elif any(k in low for k in ('fcc id','add ')):
-        typ='Golden Text'; role='COMPLIANCE'; expected=t
-    label=t.split(':',1)[0].strip() or f'Item {no}'
+        typ='Golden Text'; role='COMPLIANCE'
+        expected=(re.split(r'[:：]',t,maxsplit=1)[1].strip() if re.search(r'[:：]',t) else t)
+    label=re.split(r'[:：]',t,maxsplit=1)[0].strip() or f'Item {no}'
+    presence_item=''
+    if typ=='Golden QR':
+        presence_item=f'Golden Machine Code: QR #{no}'
+    elif typ=='Golden Barcode':
+        presence_item=f'Golden Machine Code: Barcode #{no}'
     return {
         'form_no':no,'item':f'Golden #{no}: {label[:55]}','type':typ,'role':role,
         'required':required,'selected':selected,'expected':expected,'raw_text':t,
         'origin':'GOLDEN','source':'Golden','engine_items':mapping,
-        'manual_review_allowed':typ in ('Golden Text','Golden Artwork','Golden Choice','Needs Review'),
+        'presence_item':presence_item,
+        'manual_review_allowed':typ in ('Golden Text','Golden Artwork','Golden Choice','Golden QR','Golden Barcode','Needs Review'),
         'review_status':'NEEDS_REVIEW' if typ=='Needs Review' else 'AUTO_CLASSIFIED',
     }
 
@@ -561,6 +617,9 @@ def apply_editable_items(profile: dict, rows: list[dict]) -> dict:
             if required:
                 for mapped in row.get('engine_items',[]) or []:
                     add_req(str(mapped),role)
+                presence=str(row.get('presence_item','') or '')
+                if presence:
+                    add_req(presence,role)
             if typ=='Golden Text':
                 expected=str(row.get('expected','')).strip() or str(row.get('raw_text','')).strip()
                 if expected and required:
@@ -659,6 +718,19 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     # embedded image. OCR those images once during import so inspection items
     # are derived from the Golden, not from the seed profile.
     image_ocr_text,image_ocr_rows=_ocr_golden_images(tx_images)
+    machine_codes=_detect_golden_machine_codes(tx_images)
+    # Metadata must point at the canonical committed Golden asset directory,
+    # not the temporary incoming transaction directory used during import.
+    for row in image_ocr_rows:
+        try:
+            row['file']=str(root/'imported_media'/Path(str(row.get('file',''))).name)
+        except Exception:
+            pass
+    for row in machine_codes:
+        try:
+            row['file']=str(root/'imported_media'/Path(str(row.get('file',''))).name)
+        except Exception:
+            pass
     source_text=text
     if image_ocr_text:
         text=(text + '\n' + image_ocr_text).strip()
@@ -666,7 +738,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.9',
+        'profile_version':'1.9.11',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -687,6 +759,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
             'document_text_length':len(source_text),
             'image_ocr_text_length':len(image_ocr_text),
             'image_ocr_results':image_ocr_rows,
+            'machine_codes':machine_codes,
         },
     })
     if identity['model']:
@@ -697,6 +770,26 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     # Needs Review instead of disappearing. Standard engine checks are mapped
     # behind the Golden row or added explicitly from Standard Library.
     form_items=extract_golden_form_items(source_text)
+    # Hard non-bypass rule: a machine code visible in the Golden example must
+    # exist as a Profile inspection item even when the prose does not define
+    # its payload/format. Add visual-only entries only when the numbered form
+    # does not already cover that code type/count.
+    qr_existing=sum(1 for r in form_items if r.get('type')=='Golden QR')
+    bc_existing=sum(1 for r in form_items if r.get('type')=='Golden Barcode')
+    qr_seen=[c for c in machine_codes if c.get('kind')=='QR']
+    bc_seen=[c for c in machine_codes if c.get('kind')=='BARCODE']
+    for idx,c in enumerate(qr_seen[qr_existing:],1):
+        item=f'Golden Visual QR #{qr_existing+idx}'
+        form_items.append({'form_no':None,'item':item,'type':'Golden QR','role':'DETAIL','required':True,
+            'selected':'IMAGE_DETECTED','expected':'','raw_text':'Detected in Golden label example image',
+            'origin':'GOLDEN','source':'Golden','engine_items':[],'presence_item':f'Golden Machine Code: QR Visual #{qr_existing+idx}',
+            'manual_review_allowed':True,'review_status':'NEEDS_REVIEW','machine_code_ref':c})
+    for idx,c in enumerate(bc_seen[bc_existing:],1):
+        item=f'Golden Visual Barcode #{bc_existing+idx}'
+        form_items.append({'form_no':None,'item':item,'type':'Golden Barcode','role':'DETAIL','required':True,
+            'selected':'IMAGE_DETECTED','expected':'','raw_text':'Detected in Golden label example image',
+            'origin':'GOLDEN','source':'Golden','engine_items':[],'presence_item':f'Golden Machine Code: Barcode Visual #{bc_existing+idx}',
+            'manual_review_allowed':True,'review_status':'NEEDS_REVIEW','machine_code_ref':c})
     if not form_items:
         # Image-only / non-numbered fallback preserves the previously validated
         # inference path. In Profile Manager these inferred Standard rows stay
@@ -832,7 +925,12 @@ def validation_readiness_errors(profile: dict) -> list[str]:
         no=row.get('form_no','?'); label=str(row.get('item',''))
         if typ=='Needs Review':
             errors.append(f'Golden item #{no} requires engineering review: {label}')
-        if typ in ('Golden Artwork','Golden QR','Golden Barcode','Golden Variable','Golden Choice') and not (row.get('engine_items') or []):
+        if typ in ('Golden QR','Golden Barcode'):
+            # Unknown payload/format is allowed only because a mandatory
+            # presence item + Manual Review path prevents bypass.
+            if not (row.get('engine_items') or []) and not row.get('presence_item'):
+                errors.append(f'Golden item #{no} has no machine-code presence/review path: {label}')
+        elif typ in ('Golden Artwork','Golden Variable','Golden Choice') and not (row.get('engine_items') or []):
             errors.append(f'Golden item #{no} has no Legacy CAM/Image mapping yet: {label}')
         if typ=='Golden Artwork' and (row.get('engine_items') or []):
             art=profile.get('artwork_verification',{}) or {}
@@ -857,7 +955,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.9'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.11'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})
