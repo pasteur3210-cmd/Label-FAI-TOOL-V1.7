@@ -58,7 +58,9 @@ def test_manual_review_has_item_aware_golden_region_helper():
     assert 'machine_codes' in src
     assert 'image_ocr_results' in src
     assert 'Golden ROI not mapped; showing full Golden image' in src
-    assert 'crop_box=golden_crop' in src
+    assert 'Full Golden / 完整Golden' in src
+    assert 'Focus Item / 項目放大' in src
+    assert "render_golden(None,'Full Golden reference')" in src
 
 
 def test_actual_field_record_qr_session_fusion_stays_pass_when_qr_facts_preserved(tmp_path):

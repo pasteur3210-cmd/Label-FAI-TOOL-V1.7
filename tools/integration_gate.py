@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.11 integration gate.
+"""V1.9.12 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -127,7 +127,7 @@ def main() -> int:
     # Field-record regression: session fusion must preserve normalized QR S/N +
     # MAC facts and must not turn a single-image QR PASS into a conflict.
     fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
-    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.11')
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.12')
     mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
     mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
     best={}; conflicts={}
@@ -157,8 +157,11 @@ def main() -> int:
         check(token in app, f'Manual Golden review/operator-attention wiring missing: {token}')
     for token in ('manual_attention_mode', 'manual_reviews', 'record_manual_review_action'):
         check(token in mi, f'Manual review traceability core missing: {token}')
-    for token in ('_golden_review_region', 'machine_codes', 'image_ocr_results', 'crop_box=golden_crop'):
-        check(token in app, f'Item-aware Golden focus is missing: {token}')
+    for token in ('_golden_review_region', 'machine_codes', 'image_ocr_results', 'Full Golden / 完整Golden', 'Focus Item / 項目放大'):
+        check(token in app, f'Item-aware Golden review is missing: {token}')
+    check('Artwork review: showing full Golden image' in app, 'Artwork fallback is not full-Golden safe')
+    check('artwork_review_roi' in app, 'Artwork focus is not restricted to an explicit verified ROI')
+    check("render_golden(None,'Full Golden reference')" in app, 'Manual Review does not start on the complete Golden')
     check('if role == "FULL" and not self.profile.get("dynamic_profile"):' in mi, 'Dynamic FULL path can still execute Legacy seed inspection')
     check('direct_rows=[r for r in direct_rows if r.name in dynamic_required]' in mi, 'Dynamic evidence is not filtered to current Profile requirements')
     check('"qr_sn", "qr_mac"' in mi, 'QR normalized S/N/MAC facts are not persisted into session fusion')
