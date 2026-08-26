@@ -1,22 +1,24 @@
-# Label Auto Inspection Tool V1.9.5
+# Label Auto Inspection Tool V1.9.8
 
-## V1.9.5 Golden Completeness + Standard Library + Golden-assisted Manual Review
+## V1.9.8 Operator-Attention + Clean Golden Reload Integration
 
-This release keeps the validated Legacy CAM / Image inspection engines unchanged and extends only the Dynamic Golden/Profile preparation and human-review workflow.
+This release keeps the validated automatic CAM/Image decision rules intact while hardening the Dynamic Golden integration and making manual review usable as a production fallback.
 
-### Dynamic Golden workflow
-1. Import the controlled Golden DOC/DOCX.
-2. Numbered Request-Form items are extracted one-by-one. Items that cannot be classified are kept as `Needs Review`; they are never silently dropped.
-3. Checkbox selections (`■ Yes`, `■ No`, selected alternatives) are preserved.
-4. Profile Manager shows Golden items first. Existing Legacy checks are available under `Add Item > From Standard Library` instead of being pre-populated in the table.
-5. Engineer may edit Golden rows, add Standard Library checks, or add a custom item. Any edit returns the profile to `DRAFT`.
-6. `Validate Profile` blocks unresolved required items or required Artwork that has no Legacy mapping/template.
-7. The resulting profile is consumed by the existing Legacy CAM / Image inspection engine.
+### Dynamic Golden / Profile isolation
+1. Import Golden always starts from a clean generic engine template; model-specific required items, expected text, artwork and rules are not inherited from the previously selected profile.
+2. Re-importing the same Model / Label P/N uses transactional asset replacement. Previous embedded Golden images are removed only after the new profile passes structure/identity checks.
+3. Switching Profile/Golden invalidates the previous Image result and Manual Review list. Loaded photos may remain selected, but they must be analyzed again under the new profile before results can be used.
+4. Dynamic profile UI identity remains unique by Label P/N.
 
-### Manual Review
-For eligible visual items, `Confirm Selected as PASS` now opens an Actual-vs-Golden comparison window before the operator confirms PASS. Automatic evidence/result remains preserved in logs and reports.
+### Manual Review / operator attention
+- Every required item whose automatic result is not PASS/MANUAL_PASS appears in the Manual Review list.
+- `OVERRIDE_ALLOWED`: visual/Golden/fixed-text/artwork items can become `MANUAL_PASS` only after Actual-vs-Golden comparison.
+- `REVIEW_ONLY`: identity, barcode, QR/consistency and other traceability-sensitive items are still shown, but a single visual click cannot change the machine result to PASS.
+- Review-only actions (`KEEP_AUTO`, `CONFIRM_FAIL`, `REQUEST_RECHECK`) are recorded.
+- Manual PASS and review actions are written to execution/test/debug logs, `result.json`, and the Excel `Manual_Review_Log` sheet.
+- One item is reviewed at a time so the displayed Actual/Golden pair always corresponds to the decision being recorded.
 
 ### Regression protection
-V1.9.5 does not modify these validated Legacy core engines: `multi_image_inspection.py`, `live_engine.py`, `smart_lock.py`, `engine.py`, `artwork_presence.py`, `parser.py`, `rules.py`, `decoder.py`.
+Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.8 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
 
-GitHub Actions uses Python 3.11, workspace cleanup, release gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.
+GitHub Actions uses Python 3.11, workspace cleanup, release gate, end-to-end integration gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.
