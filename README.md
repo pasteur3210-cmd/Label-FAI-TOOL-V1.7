@@ -1,6 +1,6 @@
-# Label Auto Inspection Tool V1.9.8
+# Label Auto Inspection Tool V1.9.9
 
-## V1.9.8 Operator-Attention + Clean Golden Reload Integration
+## V1.9.9 Operator-Attention + Clean Golden Reload Integration
 
 This release keeps the validated automatic CAM/Image decision rules intact while hardening the Dynamic Golden integration and making manual review usable as a production fallback.
 
@@ -19,6 +19,6 @@ This release keeps the validated automatic CAM/Image decision rules intact while
 - One item is reviewed at a time so the displayed Actual/Golden pair always corresponds to the decision being recorded.
 
 ### Regression protection
-Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.8 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
+Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.9 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
 
 GitHub Actions uses Python 3.11, workspace cleanup, release gate, end-to-end integration gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.

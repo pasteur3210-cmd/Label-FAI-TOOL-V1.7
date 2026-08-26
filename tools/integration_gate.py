@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.8 integration gate.
+"""V1.9.9 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -144,6 +144,12 @@ def main() -> int:
     # 7) Profile/Golden switch must clear rendered Image evidence so an old
     # session cannot be reviewed under a newly loaded Golden.
     check('IMAGE_SESSION_INVALIDATED' in app, 'Profile/Golden change does not invalidate previous Image result')
+
+    # 7b) V1.9.8 regression: Import Golden profile path resolution must not use
+    # an undefined bare Path symbol (GitHub Ruff F821). app.py imports pathlib.
+    check('imported_resolved=Path(path).resolve()' not in app, 'Undefined bare Path regression in Import Golden path resolution')
+    check('if Path(pp).resolve() == imported_resolved:' not in app, 'Undefined bare Path regression in Profile lookup')
+    check('pathlib.Path(path).resolve()' in app and 'pathlib.Path(pp).resolve()' in app, 'Import Golden path resolution is not explicitly namespaced')
 
     # 8) Re-importing the same Golden identity must replace, not merge, the
     # asset directory. This prevents old embedded label images being shown in
