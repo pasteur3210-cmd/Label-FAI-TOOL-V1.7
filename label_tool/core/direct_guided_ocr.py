@@ -325,13 +325,16 @@ class DirectGuidedOCR:
 
         if target.mode == "model":
             expected = self.profile.get("fixed_fields", {}).get("model", target.expected)
+            aliases=list(self.profile.get('model_aliases',[]) or [expected])
             # Ignore punctuation/spaces but NOT alphanumeric content.
-            ok = compact(expected) in comp
-            rows.append(self._row(target.item, expected if ok else norm, expected,
+            match=next((x for x in aliases if compact(x) in comp), '')
+            ok=bool(match)
+            expected_display=' / '.join(str(x) for x in aliases)
+            rows.append(self._row(target.item, match if ok else norm, expected_display,
                                   "PASS" if ok else "WARN",
                                   "Direct target OCR" if ok else "Model not recognized",
                                   "" if ok else "OCR-MODEL"))
-            return rows, expected, 1.0 if ok else 0.0
+            return rows, expected_display, 1.0 if ok else 0.0
 
         if target.mode == "pn":
             expected = (expected_wo.get("pn") or "").strip()

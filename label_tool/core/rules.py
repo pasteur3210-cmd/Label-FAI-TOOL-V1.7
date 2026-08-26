@@ -29,8 +29,11 @@ def validate(fields: Dict[str, str], profile: Dict, expected_work_order=None) ->
         if not actual:
             out.append(_fr(f"Fixed: {key}", "", spec_value, "WARN", "Fixed value not recognized from image", f"OCR-{key.upper()}"))
         else:
-            ok = _eq(actual, spec_value)
-            out.append(_fr(f"Fixed: {key}", actual, spec_value, "PASS" if ok else "FAIL", "" if ok else "Does not match SPEC", "" if ok else f"SPEC-{key.upper()}"))
+            accepted=[str(spec_value)]
+            if key=='model': accepted=list(profile.get('model_aliases',[]) or accepted)
+            ok = any(_eq(actual, x) for x in accepted)
+            expected_display=' / '.join(accepted)
+            out.append(_fr(f"Fixed: {key}", actual, expected_display, "PASS" if ok else "FAIL", "" if ok else "Does not match SPEC", "" if ok else f"SPEC-{key.upper()}"))
 
     for title, key in [
         ("Fixed: GPON VoIP Gateway", "has_gateway_text"),

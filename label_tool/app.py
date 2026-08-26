@@ -10,6 +10,7 @@ import re
 import traceback
 import time
 from datetime import datetime
+import pathlib
 
 import cv2
 from PIL import Image, ImageTk
@@ -18,7 +19,8 @@ from . import __version__
 from .core.engine import InspectionEngine
 from .core.multi_image_inspection import MultiImageInspectionEngine
 from .core.profile_manager import discover_profiles
-from .core.golden_profile_manager import build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors
+from .core.golden_profile_manager import (build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors,
+    _dynamic_item_rows, apply_editable_items, save_profile_identity_edits)
 from .core.camera_manager import CameraManager
 from .core.live_engine import LiveFrameAnalyzer, LOCK_TO_FIELD
 from .core.smart_lock import SmartLockEngine, IdentityGuard
@@ -146,7 +148,7 @@ class App(tk.Tk):
                     base_name=candidate; break
         base=self.profiles[base_name][1]
         try:
-            # V1.9.3: identity is generated ONLY from imported Golden metadata.
+            # V1.9.4: identity is generated ONLY from imported Golden metadata.
             # Do not ask for / seed a model-dependent profile name here.
             path,profile=build_dynamic_profile(source,base)
             identity_errors=dynamic_identity_errors(profile,path)
@@ -174,10 +176,12 @@ class App(tk.Tk):
             messagebox.showinfo("Profile Manager","Select a profile first.")
             return
         path,data=self.profiles[name]
-        win=tk.Toplevel(self); win.title(f"Profile Manager - {name}"); win.geometry("1180x780")
+        working=json.loads(json.dumps(data))
+        win=tk.Toplevel(self); win.title(f"Profile Manager - {name}"); win.geometry("1280x820")
         hdr=ttk.Frame(win,padding=8); hdr.pack(fill='x')
-        status=str(data.get('profile_status','BUNDLED')).upper()
-        ttk.Label(hdr,text=f"Profile: {data.get('profile_name',name)} | Status: {status}",font=("Segoe UI",11,"bold")).pack(side='left')
+        status=str(working.get('profile_status','BUNDLED')).upper()
+        title_var=tk.StringVar(value=f"Profile: {working.get('profile_name',name)} | Status: {status}")
+        ttk.Label(hdr,textvariable=title_var,font=("Segoe UI",11,"bold")).pack(side='left')
         btns=ttk.Frame(hdr); btns.pack(side='right')
 
         nb=ttk.Notebook(win); nb.pack(fill='both',expand=True,padx=8,pady=(0,8))
@@ -186,70 +190,183 @@ class App(tk.Tk):
         nb.add(checks_tab,text='Inspection Items / 檢查項目')
         nb.add(advanced_tab,text='Advanced JSON / 工程設定')
 
-        summary=ttk.Treeview(summary_tab,columns=('field','value'),show='headings',height=18)
+        # ----- Summary -----
+        summary_top=ttk.Frame(summary_tab); summary_top.pack(fill='x',pady=(0,6))
+        ttk.Label(summary_top,text='Golden/Profile metadata. Dynamic profiles can be corrected here without editing Python.').pack(side='left')
+        summary_holder=ttk.Frame(summary_tab); summary_holder.pack(fill='both',expand=True)
+        summary=ttk.Treeview(summary_holder,columns=('field','value'),show='headings',height=18)
         summary.heading('field',text='Field'); summary.heading('value',text='Value')
-        summary.column('field',width=220,anchor='w'); summary.column('value',width=820,anchor='w')
-        sy=ttk.Scrollbar(summary_tab,orient='vertical',command=summary.yview); summary.configure(yscrollcommand=sy.set)
+        summary.column('field',width=230,anchor='w'); summary.column('value',width=880,anchor='w')
+        sy=ttk.Scrollbar(summary_holder,orient='vertical',command=summary.yview); summary.configure(yscrollcommand=sy.set)
         summary.pack(side='left',fill='both',expand=True); sy.pack(side='right',fill='y')
-        gi=data.get('golden_import',{}) or {}
-        summary_rows=[
-            ('Profile Name',data.get('profile_name','')),('Model',data.get('model','')),('Label Type',data.get('label_type','')),
-            ('Label P/N',data.get('label_pn','')),('Profile Version',data.get('profile_version','')),('Status',status),
-            ('Profile File',str(path)),('Golden Source',gi.get('source_file','')),('Golden SHA256',gi.get('source_sha256','')),
-            ('Imported At',gi.get('imported_at','')),('Embedded Images',gi.get('embedded_image_count',0)),
-            ('Fixed Text Candidates',len(data.get('dynamic_fixed_texts',[]) or [])),
-        ]
-        id_errors=dynamic_identity_errors(data,path)
-        summary_rows.append(('Identity Check','PASS' if not id_errors else 'FAIL: ' + '; '.join(id_errors)))
-        for k,v in summary_rows: summary.insert('', 'end', values=(k,v))
 
-        cols=('item','type','role','required','threshold')
-        checks=ttk.Treeview(checks_tab,columns=cols,show='headings')
-        for c,t,w in [('item','Inspection Item',470),('type','Type',130),('role','Role',140),('required','Required',90),('threshold','Threshold',100)]:
-            checks.heading(c,text=t); checks.column(c,width=w,anchor='w')
-        cy=ttk.Scrollbar(checks_tab,orient='vertical',command=checks.yview); checks.configure(yscrollcommand=cy.set)
-        checks.pack(side='left',fill='both',expand=True); cy.pack(side='right',fill='y')
-        required=set((data.get('live',{}) or {}).get('required_items',[]) or [])
-        dynamic_by_item={r.get('item'):r for r in (data.get('dynamic_fixed_texts',[]) or []) if isinstance(r,dict)}
-        role_lookup={}
-        for role,items in ((data.get('image_inspection',{}) or {}).get('role_items',{}) or {}).items():
-            for item in items or []: role_lookup[item]=role
-        all_items=[]
-        for item in required:
-            row=dynamic_by_item.get(item,{})
-            typ='Golden Text' if item in dynamic_by_item else ('Artwork' if str(item).startswith('Artwork:') else 'Standard')
-            all_items.append((item,typ,role_lookup.get(item,row.get('role','')), 'Yes', row.get('threshold','')))
-        for item,row in dynamic_by_item.items():
-            if item not in required:
-                all_items.append((item,'Golden Text',role_lookup.get(item,row.get('role','')), 'No',row.get('threshold','')))
-        for values in sorted(all_items,key=lambda x:(x[1],x[0])):
-            checks.insert('', 'end', values=values)
+        def refresh_summary():
+            summary.delete(*summary.get_children())
+            gi=working.get('golden_import',{}) or {}
+            ff=working.get('fixed_fields',{}) or {}
+            rows=[
+                ('Profile Name',working.get('profile_name','')),('Internal Model',working.get('model','')),
+                ('Customer Model / Alias',working.get('customer_model','')),('Model Aliases',', '.join(working.get('model_aliases',[]) or [])),
+                ('Label Type',working.get('label_type','')),('Label P/N',working.get('label_pn','')),
+                ('Profile Version',working.get('profile_version','')),('Status',working.get('profile_status','DRAFT')),
+                ('Profile File',str(path)),('Golden Source',gi.get('source_file','')),('Golden SHA256',gi.get('source_sha256','')),
+                ('Imported At',gi.get('imported_at','')),('Embedded Images',gi.get('embedded_image_count',0)),
+                ('Golden image OCR chars',gi.get('image_ocr_text_length',0)),
+                ('Inspection Items',len(_dynamic_item_rows(working))),
+            ]
+            id_errors=dynamic_identity_errors(working,path if pathlib.Path(path).stem==str((working.get('profile_identity') or {}).get('file_stem','')) else None)
+            rows.append(('Identity Check','PASS' if not id_errors else 'REVIEW: ' + '; '.join(id_errors)))
+            for k,v in rows: summary.insert('', 'end', values=(k,v))
 
+        def edit_metadata():
+            nonlocal path,working,name
+            if not working.get('dynamic_profile'):
+                messagebox.showinfo('Edit Metadata','Bundled engineering profiles are read-only. Import a Golden to create an editable Dynamic Profile.',parent=win); return
+            d=tk.Toplevel(win); d.title('Edit Profile Metadata'); d.transient(win); d.grab_set(); d.resizable(False,False)
+            frm=ttk.Frame(d,padding=12); frm.pack(fill='both',expand=True)
+            fields=[
+                ('Internal Model',tk.StringVar(value=working.get('model',''))),
+                ('Customer Model / Alias',tk.StringVar(value=working.get('customer_model',''))),
+                ('Label Type',tk.StringVar(value=working.get('label_type',''))),
+                ('Label P/N',tk.StringVar(value=working.get('label_pn',''))),
+            ]
+            for r,(label,var) in enumerate(fields):
+                ttk.Label(frm,text=label,width=24).grid(row=r,column=0,sticky='w',pady=4)
+                ttk.Entry(frm,textvariable=var,width=48).grid(row=r,column=1,sticky='ew',pady=4)
+            ttk.Label(frm,text='Example: Internal Model = GRG-4355u; Customer Model = PRT-7302',foreground='#666').grid(row=len(fields),column=0,columnspan=2,sticky='w',pady=(8,4))
+            def save_meta():
+                nonlocal path,working,name
+                try:
+                    new_path,new_data=save_profile_identity_edits(pathlib.Path(path),working,fields[0][1].get(),fields[2][1].get(),fields[3][1].get(),fields[1][1].get())
+                    path,working=new_path,new_data; name=working['profile_name']
+                    title_var.set(f"Profile: {working['profile_name']} | Status: DRAFT")
+                    refresh_summary(); refresh_checks(); refresh_json(); d.destroy()
+                except Exception as exc: messagebox.showerror('Edit Metadata',str(exc),parent=d)
+            b=ttk.Frame(frm); b.grid(row=len(fields)+1,column=0,columnspan=2,sticky='e',pady=(10,0))
+            ttk.Button(b,text='Save',command=save_meta).pack(side='left',padx=4); ttk.Button(b,text='Cancel',command=d.destroy).pack(side='left')
+        ttk.Button(summary_top,text='Edit Metadata / 修改基本資料',command=edit_metadata).pack(side='right')
+
+        # ----- Visual Inspection Item Editor -----
+        toolbar=ttk.Frame(checks_tab); toolbar.pack(fill='x',pady=(0,6))
+        ttk.Label(toolbar,text='Review auto-detected Golden items. Add/Edit/Delete here; no Python change or rebuild is required. Artwork requires a Golden template before Validate.').pack(side='left')
+        checks_holder=ttk.Frame(checks_tab); checks_holder.pack(fill='both',expand=True)
+        cols=('item','type','role','required','threshold','expected','origin')
+        checks=ttk.Treeview(checks_holder,columns=cols,show='headings',selectmode='browse')
+        specs=[('item','Inspection Item',360),('type','Type',105),('role','Role',100),('required','Required',75),('threshold','Threshold',80),('expected','Expected / Golden Text',330),('origin','Source',100)]
+        for c,t,w in specs: checks.heading(c,text=t); checks.column(c,width=w,anchor='w')
+        cy=ttk.Scrollbar(checks_holder,orient='vertical',command=checks.yview); cx=ttk.Scrollbar(checks_holder,orient='horizontal',command=checks.xview)
+        checks.configure(yscrollcommand=cy.set,xscrollcommand=cx.set)
+        checks.grid(row=0,column=0,sticky='nsew'); cy.grid(row=0,column=1,sticky='ns'); cx.grid(row=1,column=0,sticky='ew')
+        checks_holder.rowconfigure(0,weight=1); checks_holder.columnconfigure(0,weight=1)
+        editable_rows=_dynamic_item_rows(working)
+
+        def refresh_checks():
+            nonlocal editable_rows
+            checks.delete(*checks.get_children())
+            editable_rows=_dynamic_item_rows(working)
+            for idx,row in enumerate(editable_rows):
+                checks.insert('', 'end', iid=str(idx), values=(row.get('item',''),row.get('type',''),row.get('role',''),
+                    'Yes' if row.get('required') else 'No',row.get('threshold',''),row.get('expected',''),row.get('origin','')))
+
+        def item_editor(row=None,index=None):
+            nonlocal editable_rows,working
+            row=dict(row or {'item':'','type':'Golden Text','role':'DETAIL','required':True,'threshold':0.74,'expected':'','origin':'MANUAL'})
+            d=tk.Toplevel(win); d.title('Edit Inspection Item' if index is not None else 'Add Inspection Item'); d.transient(win); d.grab_set(); d.resizable(False,False)
+            f=ttk.Frame(d,padding=12); f.pack(fill='both',expand=True)
+            item_v=tk.StringVar(value=row.get('item','')); type_v=tk.StringVar(value=row.get('type','Golden Text')); role_v=tk.StringVar(value=row.get('role','DETAIL'))
+            req_v=tk.BooleanVar(value=bool(row.get('required',True))); thr_v=tk.StringVar(value=str(row.get('threshold',''))); exp_v=tk.StringVar(value=row.get('expected',''))
+            ttk.Label(f,text='Inspection Item').grid(row=0,column=0,sticky='w',pady=4); ttk.Entry(f,textvariable=item_v,width=66).grid(row=0,column=1,sticky='ew',pady=4)
+            ttk.Label(f,text='Type').grid(row=1,column=0,sticky='w',pady=4); ttk.Combobox(f,textvariable=type_v,values=['Standard','Golden Text','Artwork'],state='readonly',width=22).grid(row=1,column=1,sticky='w',pady=4)
+            ttk.Label(f,text='Photo Role').grid(row=2,column=0,sticky='w',pady=4); ttk.Combobox(f,textvariable=role_v,values=['BASIC','WIFI','IDENTITY','COMPLIANCE','DETAIL'],state='readonly',width=22).grid(row=2,column=1,sticky='w',pady=4)
+            ttk.Label(f,text='Required').grid(row=3,column=0,sticky='w',pady=4); ttk.Checkbutton(f,variable=req_v).grid(row=3,column=1,sticky='w',pady=4)
+            ttk.Label(f,text='Threshold').grid(row=4,column=0,sticky='w',pady=4); ttk.Entry(f,textvariable=thr_v,width=18).grid(row=4,column=1,sticky='w',pady=4)
+            ttk.Label(f,text='Expected / Golden Text').grid(row=5,column=0,sticky='nw',pady=4); ttk.Entry(f,textvariable=exp_v,width=66).grid(row=5,column=1,sticky='ew',pady=4)
+            ttk.Label(f,text="For 'Golden Text', Expected is required. Standard item names should use existing engine item names.",foreground='#666').grid(row=6,column=0,columnspan=2,sticky='w',pady=(8,4))
+            def accept():
+                nonlocal editable_rows,working
+                item=item_v.get().strip(); typ=type_v.get().strip(); expected=exp_v.get().strip()
+                if not item: messagebox.showerror('Inspection Item','Inspection Item cannot be blank.',parent=d); return
+                if typ=='Golden Text' and not expected: messagebox.showerror('Inspection Item','Golden Text requires Expected text.',parent=d); return
+                threshold=thr_v.get().strip()
+                if typ=='Golden Text':
+                    try:
+                        tv=float(threshold or 0.74)
+                        if not 0 < tv <= 1: raise ValueError
+                        threshold=tv
+                    except Exception:
+                        messagebox.showerror('Inspection Item','Threshold must be between 0 and 1.',parent=d); return
+                newrow={'item':item,'type':typ,'role':role_v.get().strip() or 'DETAIL','required':req_v.get(),
+                        'threshold':threshold,'expected':expected,'origin':'MANUAL_EDIT','manual_review_allowed':typ in ('Golden Text','Artwork')}
+                rows=list(editable_rows)
+                if index is None: rows.append(newrow)
+                else: rows[index]=newrow
+                working=apply_editable_items(working,rows)
+                refresh_checks(); refresh_summary(); refresh_json(); title_var.set(f"Profile: {working.get('profile_name',name)} | Status: DRAFT")
+                d.destroy()
+            bf=ttk.Frame(f); bf.grid(row=7,column=0,columnspan=2,sticky='e',pady=(10,0))
+            ttk.Button(bf,text='Apply',command=accept).pack(side='left',padx=4); ttk.Button(bf,text='Cancel',command=d.destroy).pack(side='left')
+
+        def add_item(): item_editor()
+        def edit_item():
+            sel=checks.selection()
+            if not sel: messagebox.showinfo('Edit Item','Select an inspection item first.',parent=win); return
+            idx=int(sel[0]); item_editor(editable_rows[idx],idx)
+        def delete_item():
+            nonlocal editable_rows,working
+            sel=checks.selection()
+            if not sel: return
+            idx=int(sel[0]); row=editable_rows[idx]
+            if not messagebox.askyesno('Delete Item',f"Delete this inspection item?\n\n{row.get('item','')}",parent=win): return
+            rows=[r for i,r in enumerate(editable_rows) if i!=idx]
+            working=apply_editable_items(working,rows); refresh_checks(); refresh_summary(); refresh_json(); title_var.set(f"Profile: {working.get('profile_name',name)} | Status: DRAFT")
+        ttk.Button(toolbar,text='Add Item',command=add_item).pack(side='right',padx=3)
+        ttk.Button(toolbar,text='Edit Selected',command=edit_item).pack(side='right',padx=3)
+        ttk.Button(toolbar,text='Delete Selected',command=delete_item).pack(side='right',padx=3)
+        checks.bind('<Double-1>',lambda e: edit_item())
+
+        # ----- Advanced JSON -----
         text=tk.Text(advanced_tab,wrap='none',font=('Consolas',9),undo=True)
         y=ttk.Scrollbar(advanced_tab,orient='vertical',command=text.yview); x=ttk.Scrollbar(advanced_tab,orient='horizontal',command=text.xview)
         text.configure(yscrollcommand=y.set,xscrollcommand=x.set)
         text.grid(row=0,column=0,sticky='nsew'); y.grid(row=0,column=1,sticky='ns'); x.grid(row=1,column=0,sticky='ew')
         advanced_tab.rowconfigure(0,weight=1); advanced_tab.columnconfigure(0,weight=1)
-        text.insert('1.0',json.dumps(data,ensure_ascii=False,indent=2))
-        ttk.Label(advanced_tab,text='Advanced engineering settings. Normal Golden setup does not require editing raw JSON.',foreground='#666').grid(row=2,column=0,sticky='w',pady=(4,0))
+        ttk.Label(advanced_tab,text='Advanced engineering settings. Normal Golden setup should use Summary + Inspection Items.',foreground='#666').grid(row=2,column=0,sticky='w',pady=(4,0))
+        def refresh_json():
+            text.delete('1.0','end'); text.insert('1.0',json.dumps(working,ensure_ascii=False,indent=2))
 
-        def save_json():
+        def save_working(close_after=False):
+            nonlocal working,path,name
             try:
-                new=json.loads(text.get('1.0','end-1c'))
-                errs=validate_profile_structure(new,path)
+                # Advanced JSON is authoritative only if that tab is selected.
+                if nb.select()==str(advanced_tab):
+                    working=json.loads(text.get('1.0','end-1c'))
+                working['profile_version']='1.9.4'
+                working['profile_status']='DRAFT'
+                errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
-                    new['profile_status']='DRAFT'
-                    messagebox.showerror("Profile Validation","Cannot save an inconsistent dynamic Profile:\n- " + "\n- ".join(errs),parent=win)
-                    return
-                path.write_text(json.dumps(new,ensure_ascii=False,indent=2),encoding='utf-8')
+                    messagebox.showerror('Profile Validation','Cannot save Profile:\n- ' + '\n- '.join(errs),parent=win); return False
+                pathlib.Path(path).write_text(json.dumps(working,ensure_ascii=False,indent=2),encoding='utf-8')
                 self._load_profiles(); self.profile_combo['values']=list(self.profiles.keys())
-                self.profile_var.set(new.get('profile_name',name)); self._apply_profile()
-                messagebox.showinfo("Profile Manager","Profile saved. Cache will be invalidated automatically by profile content hash.",parent=win)
-                win.destroy()
+                name=working.get('profile_name',name); self.profile_var.set(name); self._apply_profile()
+                log.info('PROFILE_EDIT_SAVE profile=%s file=%s items=%s',name,path,len(_dynamic_item_rows(working)))
+                if close_after: win.destroy()
+                else: messagebox.showinfo('Profile Manager','Draft Profile saved. Validate only after known-good/known-NG label tests.',parent=win)
+                return True
             except Exception as exc:
-                messagebox.showerror("Profile Manager",str(exc),parent=win)
-        ttk.Button(btns,text='Save Advanced Changes',command=save_json).pack(side='left',padx=3)
+                messagebox.showerror('Profile Manager',str(exc),parent=win); return False
+
+        def save_advanced():
+            try:
+                nonlocal working
+                working=json.loads(text.get('1.0','end-1c'))
+                working['profile_status']='DRAFT'; refresh_checks(); refresh_summary()
+                save_working(False)
+            except Exception as exc: messagebox.showerror('Profile Manager',str(exc),parent=win)
+
+        ttk.Button(btns,text='Save Draft / 儲存草稿',command=lambda:save_working(False)).pack(side='left',padx=3)
+        ttk.Button(btns,text='Save Advanced JSON',command=save_advanced).pack(side='left',padx=3)
         ttk.Button(btns,text='Close',command=win.destroy).pack(side='left',padx=3)
+        refresh_summary(); refresh_checks(); refresh_json()
 
     def _validate_current_profile(self):
         name=self.profile_var.get()
@@ -409,7 +526,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.3 Stable Dynamic Golden Profile + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.4 Clean Dynamic Golden Profile + Visual Editor + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -1964,7 +2081,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.3 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.4 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.
