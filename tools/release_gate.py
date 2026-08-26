@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = '1.9.3'
+EXPECTED_VERSION = '1.9.4'
 REQUIRED = [
     '.github/workflows/build.yml',
     'label_tool/__init__.py',
@@ -68,6 +68,12 @@ def main() -> int:
         fail('Python 3.11-safe legacy DOC conversion guard is missing')
     if 'dynamic_identity_errors' not in gp or 'profile_identity' not in gp:
         fail('Dynamic Golden identity consistency gate is missing')
+    if '_clean_engine_template(base_profile)' not in gp:
+        fail('V1.9.4 clean Dynamic Golden engine-template boundary is missing')
+    if 'profile=deepcopy(base_profile)' in gp.replace(' ', ''):
+        fail('Dynamic Golden still directly deep-copies a model-specific seed profile')
+    if 'apply_editable_items' not in gp or '_dynamic_item_rows' not in gp:
+        fail('Visual Profile Editor data model is missing')
 
     print(f'[RELEASE_GATE][PASS] version={EXPECTED_VERSION} python311_files={parsed} required_files={len(REQUIRED)}')
     return 0

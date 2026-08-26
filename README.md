@@ -1,8 +1,16 @@
-# Label Auto Inspection Tool V1.9.3
+# Label Auto Inspection Tool V1.9.4
+
+
+## V1.9.4 Clean Dynamic Golden + Visual Profile Editor
+
+- Importing a new Golden no longer inherits the previous model's required items, fixed fields, rules, ROIs or artwork templates.
+- DOC/DOCX embedded label images are OCR'd once during import when RapidOCR is available.
+- Profile Manager supports Add / Edit / Delete inspection items and editable Internal Model / Customer Model Alias metadata.
+- Every manual edit returns the profile to DRAFT until re-validation.
 
 ## Dynamic Golden Profile Engine
 
-V1.9.3 keeps the validated V1.8.2 incremental image cache and Manual Review workflow, and adds external Golden-driven profiles so a new label can be introduced without editing Python or rebuilding the EXE.
+V1.9.4 keeps the validated V1.8.2 incremental image cache and Manual Review workflow, and adds external Golden-driven profiles so a new label can be introduced without editing Python or rebuilding the EXE.
 
 ### New workflow
 1. Select the closest existing profile as a baseline.
