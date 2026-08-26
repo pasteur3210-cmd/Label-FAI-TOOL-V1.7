@@ -1,36 +1,22 @@
-# Label Auto Inspection Tool V1.9.4
+# Label Auto Inspection Tool V1.9.5
 
+## V1.9.5 Golden Completeness + Standard Library + Golden-assisted Manual Review
 
-## V1.9.4 Clean Dynamic Golden + Visual Profile Editor
+This release keeps the validated Legacy CAM / Image inspection engines unchanged and extends only the Dynamic Golden/Profile preparation and human-review workflow.
 
-- Importing a new Golden no longer inherits the previous model's required items, fixed fields, rules, ROIs or artwork templates.
-- DOC/DOCX embedded label images are OCR'd once during import when RapidOCR is available.
-- Profile Manager supports Add / Edit / Delete inspection items and editable Internal Model / Customer Model Alias metadata.
-- Every manual edit returns the profile to DRAFT until re-validation.
+### Dynamic Golden workflow
+1. Import the controlled Golden DOC/DOCX.
+2. Numbered Request-Form items are extracted one-by-one. Items that cannot be classified are kept as `Needs Review`; they are never silently dropped.
+3. Checkbox selections (`■ Yes`, `■ No`, selected alternatives) are preserved.
+4. Profile Manager shows Golden items first. Existing Legacy checks are available under `Add Item > From Standard Library` instead of being pre-populated in the table.
+5. Engineer may edit Golden rows, add Standard Library checks, or add a custom item. Any edit returns the profile to `DRAFT`.
+6. `Validate Profile` blocks unresolved required items or required Artwork that has no Legacy mapping/template.
+7. The resulting profile is consumed by the existing Legacy CAM / Image inspection engine.
 
-## Dynamic Golden Profile Engine
+### Manual Review
+For eligible visual items, `Confirm Selected as PASS` now opens an Actual-vs-Golden comparison window before the operator confirms PASS. Automatic evidence/result remains preserved in logs and reports.
 
-V1.9.4 keeps the validated V1.8.2 incremental image cache and Manual Review workflow, and adds external Golden-driven profiles so a new label can be introduced without editing Python or rebuilding the EXE.
+### Regression protection
+V1.9.5 does not modify these validated Legacy core engines: `multi_image_inspection.py`, `live_engine.py`, `smart_lock.py`, `engine.py`, `artwork_presence.py`, `parser.py`, `rules.py`, `decoder.py`.
 
-### New workflow
-1. Select the closest existing profile as a baseline.
-2. Click **Import Golden** and choose DOC / DOCX / PNG / JPG.
-3. The tool extracts Golden text/media and creates an external `profiles/<name>.json` DRAFT profile next to the EXE.
-4. Review **Summary / Inspection Items** in **Profile Manager**. Raw JSON is moved to an Advanced tab for engineering-only changes.
-5. Test known-good label images and click **Validate Profile** after engineering confirmation.
-6. Future runs load the external profile directly; no GitHub rebuild is required for profile changes.
-
-Legacy `.doc` import uses Microsoft Word COM on Windows to convert the file to DOCX. DOCX and image import do not require Word.
-
-### Safety / traceability
-- Imported Golden SHA-256 and timestamps are saved in the profile.
-- Dynamic Profile name/file identity is generated from the imported Golden Model + Label Type + P/N; seed profile names cannot leak into a new Model.
-- Identity mismatch blocks Save/Validate. Legacy malformed V1.9.0/V1.9.1 dynamic profiles are skipped and should be re-imported from Golden.
-- Profile edits change the cache context hash, so stale image evidence is not reused.
-- Dynamic Golden fixed-text checks run from profile data using fuzzy OCR similarity.
-- `dynamic_variable_fields` may define profile-only regex checks without changing source code.
-- Dynamic profiles start as **DRAFT** and become **VALIDATED** only after explicit engineering confirmation.
-- Existing Chassis / Inner Box profiles remain bundled and regression protected.
-
-### Performance
-V1.8.2 incremental behavior remains: previously analyzed photos are cache hits; only new/unresolved evidence is analyzed. `Force Re-analyze All` remains available for engineering verification.
+GitHub Actions uses Python 3.11, workspace cleanup, release gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.

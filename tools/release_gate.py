@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = '1.9.4'
+EXPECTED_VERSION = '1.9.5'
 REQUIRED = [
     '.github/workflows/build.yml',
     'label_tool/__init__.py',
@@ -69,11 +69,18 @@ def main() -> int:
     if 'dynamic_identity_errors' not in gp or 'profile_identity' not in gp:
         fail('Dynamic Golden identity consistency gate is missing')
     if '_clean_engine_template(base_profile)' not in gp:
-        fail('V1.9.4 clean Dynamic Golden engine-template boundary is missing')
+        fail('V1.9.5 clean Dynamic Golden engine-template boundary is missing')
     if 'profile=deepcopy(base_profile)' in gp.replace(' ', ''):
         fail('Dynamic Golden still directly deep-copies a model-specific seed profile')
     if 'apply_editable_items' not in gp or '_dynamic_item_rows' not in gp:
         fail('Visual Profile Editor data model is missing')
+
+    if 'extract_golden_form_items' not in gp or 'golden_completeness' not in gp:
+        fail('V1.9.5 numbered Golden completeness parser is missing')
+    if 'STANDARD_LIBRARY' not in gp or 'validation_readiness_errors' not in gp:
+        fail('V1.9.5 Standard Library / validation readiness gate is missing')
+    if '_show_manual_golden_review' not in app or 'Golden Reference / Golden 對照' not in app:
+        fail('V1.9.5 Golden-assisted Manual Review UI is missing')
 
     print(f'[RELEASE_GATE][PASS] version={EXPECTED_VERSION} python311_files={parsed} required_files={len(REQUIRED)}')
     return 0
