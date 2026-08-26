@@ -93,7 +93,7 @@ class InspectionEngine:
         (debug_dir / "ocr.txt").write_text(full_ocr, encoding="utf-8")
         (debug_dir / "roi_ocr.txt").write_text("\n\n".join(f"[{k}]\n{v}" for k, v in roi_texts.items()), encoding="utf-8")
 
-        fields = merge_fields(full_ocr, decoded_texts, roi_texts=roi_texts)
+        fields = merge_fields(full_ocr, decoded_texts, roi_texts=roi_texts, profile=self.profile)
         result.fields = validate(fields, self.profile, expected_work_order=expected or {})
         result.overall = overall_status(result.fields, quality.passed)
 

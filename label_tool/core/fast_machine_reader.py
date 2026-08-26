@@ -63,7 +63,7 @@ class FastMachineReader:
                 seen.add(text)
                 texts.append(text)
 
-        fields = parse_decoded_fields(texts)
+        fields = parse_decoded_fields(texts, profile=self.profile)
         rules = self.profile.get("rules", {})
         rows = []
 

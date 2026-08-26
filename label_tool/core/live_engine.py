@@ -183,7 +183,7 @@ class LiveFrameAnalyzer:
         timings["ocr"] = (time.perf_counter() - t) * 1000.0
 
         t = time.perf_counter()
-        fields = merge_fields("", decoded_texts, roi_texts=roi_texts)
+        fields = merge_fields("", decoded_texts, roi_texts=roi_texts, profile=self.profile)
 
         # Restore values that have already been LOCKED, so relation checks can
         # complete without re-scanning those source ROIs.
@@ -234,7 +234,7 @@ class LiveFrameAnalyzer:
         if not value:
             return []
 
-        f = merge_fields("", [value], roi_texts={})
+        f = merge_fields("", [value], roi_texts={}, profile=self.profile)
         all_results = validate(
             f,
             self.profile,

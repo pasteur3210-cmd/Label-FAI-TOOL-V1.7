@@ -121,6 +121,7 @@ class MultiImageResult:
     position_evidence: dict = field(default_factory=dict)
     closeup_shape_evidence: dict = field(default_factory=dict)
     manual_overrides: dict = field(default_factory=dict)
+    manual_reviews: list[dict] = field(default_factory=list)
     automatic_overall: str = ""
     expected_work_order: dict = field(default_factory=dict)
     processed_images: list[dict] = field(default_factory=list)
@@ -246,10 +247,60 @@ class MultiImageInspectionEngine:
 
     @staticmethod
     def _manual_review_allowed(item: str) -> bool:
+        """Return whether an operator may convert a non-PASS result to MANUAL_PASS.
+
+        All non-PASS items are still shown in the operator-attention list.
+        Machine identity/barcode/consistency items remain review-only so a
+        human click cannot silently overwrite traceability data.
+        """
         item = str(item or "")
-        if item.startswith("Fixed: ") or item.startswith("Artwork: "):
+        if item.startswith("Fixed: ") or item.startswith("Artwork: ") or item.startswith("Golden #") or item.startswith("Golden Text:"):
             return True
         return item in {"Variable: Made in Format"}
+
+    @classmethod
+    def manual_attention_mode(cls, item: str) -> str:
+        return "OVERRIDE_ALLOWED" if cls._manual_review_allowed(item) else "REVIEW_ONLY"
+
+    def record_manual_review_action(self, result: MultiImageResult, item: str, action: str, note: str = "") -> MultiImageResult:
+        """Record operator review for any non-PASS item without altering auto evidence.
+
+        Used for review-only identity/barcode/consistency cases and for explicit
+        Confirm FAIL/Keep Auto actions. The automatic/final result remains
+        traceable and the action is written to JSON/Excel/logs.
+        """
+        if result is None:
+            raise ValueError("No image inspection result")
+        item=str(item or "").strip()
+        if not item:
+            raise ValueError("Manual review item is blank")
+        action=str(action or "KEEP_AUTO").strip().upper()
+        ev=result.evidence.get(item)
+        auto_result="CONFLICT" if item in result.conflicts else (ev.result if ev else "NEED_MORE_IMAGE")
+        row={
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "item": item,
+            "action": action,
+            "mode": self.manual_attention_mode(item),
+            "auto_result": auto_result,
+            "final_result": (ev.result if ev else auto_result),
+            "note": str(note or ""),
+            "source_image": ev.source_image if ev else "",
+            "actual": ev.actual if ev else "",
+            "expected": ev.expected if ev else "",
+        }
+        result.manual_reviews.append(row)
+        session_dir=Path(result.session_dir)
+        line=(f"{datetime.now().isoformat(timespec='milliseconds')} | MANUAL_ATTENTION "
+              f"item={item} mode={row['mode']} auto={auto_result} action={action} note={note!r}\n")
+        for path_name in ("execution.log","test.log","debug.log"):
+            try:
+                with (session_dir/path_name).open("a",encoding="utf-8") as f: f.write(line)
+            except Exception:
+                pass
+        result.report_path=self._write_excel(result,result.expected_work_order or {})
+        (session_dir/"result.json").write_text(json.dumps(self._serialize(result),ensure_ascii=False,indent=2),encoding="utf-8")
+        return result
 
     def _rescue_fixed_phrase(self, row_map: dict, raw_text: str, corrected_path: str, item: str, expected: str, roi, threshold: float = 0.74):
         """V1.8.0 targeted fixed-phrase rescue for clear photos.
@@ -440,7 +491,7 @@ class MultiImageInspectionEngine:
     def _direct_original_facts(self, image):
         decoded, decoded_texts = self._decode_original(image)
         raw_text = self._ocr_original(image)
-        fields = merge_fields(raw_text, decoded_texts, roi_texts={})
+        fields = merge_fields(raw_text, decoded_texts, roi_texts={}, profile=self.profile)
         return fields, raw_text, decoded_texts, decoded
 
     @staticmethod
@@ -1030,6 +1081,7 @@ class MultiImageInspectionEngine:
             "closeup_shape_evidence": result.closeup_shape_evidence,
             "automatic_overall": result.automatic_overall,
             "manual_overrides": result.manual_overrides,
+            "manual_reviews": result.manual_reviews,
             "expected_work_order": result.expected_work_order,
             "processed_images": result.processed_images,
             "cache_context": result.cache_context,
@@ -1050,7 +1102,7 @@ class MultiImageInspectionEngine:
         ws = wb.add_worksheet("Summary")
         rows = [
             ("Overall", result.overall), ("Automatic Overall", result.automatic_overall or result.overall),
-            ("Manual Overrides", len(result.manual_overrides)), ("Inspection Mode", "GUIDED_MULTI_IMAGE"),
+            ("Manual Overrides", len(result.manual_overrides)), ("Manual Review Actions", len(result.manual_reviews)), ("Inspection Mode", "GUIDED_MULTI_IMAGE"),
             ("Recommended Capture", "Full Label + Basic + WiFi + Identity + Compliance"),
             ("Profile", self.profile.get("profile_name", "")), ("Label Type", self.profile.get("label_type", "")),
             ("Software Version", self.software_version), ("Session ID", result.session_id),
@@ -1096,6 +1148,13 @@ class MultiImageInspectionEngine:
             info = result.field_sources.get(key, {})
             facts.write_row(rr, 0, [key, str(result.session_fields.get(key, "")), info.get("source", ""), round(float(info.get("quality", 0)), 3)], c)
         facts.set_column(0, 0, 32); facts.set_column(1, 1, 45); facts.set_column(2, 2, 55); facts.set_column(3, 3, 12)
+
+        reviews = wb.add_worksheet("Manual_Review_Log")
+        review_heads=["Timestamp","Item","Mode","Auto Result","Action","Final Result","Actual","Expected","Source Image","Note"]
+        reviews.write_row(0,0,review_heads,h)
+        for rr,row in enumerate(result.manual_reviews,1):
+            reviews.write_row(rr,0,[row.get("timestamp",""),row.get("item",""),row.get("mode",""),row.get("auto_result",""),row.get("action",""),row.get("final_result",""),row.get("actual",""),row.get("expected",""),row.get("source_image",""),row.get("note","")],c)
+        reviews.set_column(0,0,21); reviews.set_column(1,1,44); reviews.set_column(2,5,20); reviews.set_column(6,9,38)
 
         wb.close()
         return str(p)

@@ -148,7 +148,7 @@ class App(tk.Tk):
                     base_name=candidate; break
         base=self.profiles[base_name][1]
         try:
-            # V1.9.5: identity is generated ONLY from imported Golden metadata.
+            # V1.9.8: identity is generated ONLY from imported Golden metadata.
             # Do not ask for / seed a model-dependent profile name here.
             path,profile=build_dynamic_profile(source,base)
             identity_errors=dynamic_identity_errors(profile,path)
@@ -156,7 +156,18 @@ class App(tk.Tk):
                 raise RuntimeError('Imported Golden identity validation failed: ' + '; '.join(identity_errors))
             self._load_profiles()
             self.profile_combo['values']=list(self.profiles.keys())
-            self.profile_var.set(profile['profile_name'])
+            imported_key=''
+            try:
+                imported_resolved=Path(path).resolve()
+                for key,(pp,_dd) in self.profiles.items():
+                    if Path(pp).resolve() == imported_resolved:
+                        imported_key=key; break
+            except Exception:
+                imported_key=''
+            if not imported_key:
+                imported_key=next((k for k,(_pp,dd) in self.profiles.items()
+                                   if dd.get('profile_identity')==profile.get('profile_identity')), '')
+            self.profile_var.set(imported_key or profile['profile_name'])
             self._apply_profile()
             log.info("GOLDEN_IMPORT profile=%s file=%s sha256=%s",profile['profile_name'],source,profile.get('golden_import',{}).get('source_sha256',''))
             messagebox.showinfo("Golden Imported",
@@ -374,7 +385,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.5'
+                working['profile_version']='1.9.8'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -560,7 +571,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.5 Clean Dynamic Golden Profile + Visual Editor + V1.8.2 incremental cache: import Golden to create an external Profile; only new/unresolved images are analyzed.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.8 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -574,21 +585,21 @@ class App(tk.Tk):
         # PASS/refresh controls remain reachable at all supported resolutions.
         manual=ttk.LabelFrame(right,text="Manual Review / 人工目檢輔助",padding=6)
         manual.pack(fill="x",pady=(2,6))
-        ttk.Label(manual,text="Select unresolved visual items, then confirm by visual inspection. Identity/barcode/consistency items cannot be overridden.",wraplength=980).grid(row=0,column=0,columnspan=5,sticky="w")
+        ttk.Label(manual,text="All non-PASS items are listed here. Visual/Golden items can be manually overridden after Golden comparison; identity/barcode/consistency items are REVIEW-ONLY and remain traceable.",wraplength=980).grid(row=0,column=0,columnspan=5,sticky="w")
         list_frame=ttk.Frame(manual)
         list_frame.grid(row=1,column=0,columnspan=5,sticky="ew",pady=4)
-        self.image_manual_list=tk.Listbox(list_frame,selectmode="extended",height=3,exportselection=False)
+        self.image_manual_list=tk.Listbox(list_frame,selectmode="browse",height=4,exportselection=False)
         manual_scroll=ttk.Scrollbar(list_frame,orient="vertical",command=self.image_manual_list.yview)
         self.image_manual_list.configure(yscrollcommand=manual_scroll.set)
         self.image_manual_list.pack(side="left",fill="x",expand=True)
         manual_scroll.pack(side="right",fill="y")
         ttk.Label(manual,text="Note:").grid(row=2,column=0,sticky="w")
         ttk.Entry(manual,textvariable=self.image_manual_note_var,width=44).grid(row=2,column=1,sticky="ew",padx=4)
-        self.image_manual_pass_btn=ttk.Button(manual,text="Confirm Selected as PASS",command=self.manual_review_selected,state="disabled")
+        self.image_manual_pass_btn=ttk.Button(manual,text="Review with Golden / Golden對照復判",command=self.manual_review_selected,state="disabled")
         self.image_manual_pass_btn.grid(row=2,column=2,padx=4)
         self.image_manual_refresh_btn=ttk.Button(manual,text="Refresh Review List",command=self._refresh_manual_review_list,state="disabled")
         self.image_manual_refresh_btn.grid(row=2,column=3,padx=4)
-        ttk.Label(manual,text="Manual PASS is logged",foreground="#555555").grid(row=2,column=4,sticky="e",padx=(8,0))
+        ttk.Label(manual,text="All review actions are logged",foreground="#555555").grid(row=2,column=4,sticky="e",padx=(8,0))
         manual.columnconfigure(1,weight=1)
         list_frame.columnconfigure(0,weight=1)
 
@@ -617,6 +628,10 @@ class App(tk.Tk):
         name=self.profile_var.get()
         if not name or name not in self.profiles:return
         path,data=self.profiles[name]
+        previous_identity=getattr(self,'_active_profile_identity','')
+        new_identity=f"{path.resolve()}|{(data.get('golden_import') or {}).get('source_sha256','')}|{data.get('profile_version','')}"
+        profile_changed=bool(previous_identity and previous_identity != new_identity)
+        self._active_profile_identity=new_identity
         self.engine=InspectionEngine(data)
         self.multi_image_engine=MultiImageInspectionEngine(data, software_version=__version__)
         self.live_analyzer=LiveFrameAnalyzer(data)
@@ -642,6 +657,31 @@ class App(tk.Tk):
         art_status=self.zone_ocr.artwork.resource_status()
         log.info('ARTWORK_RESOURCE_STATUS profile=%s status=%s',name,art_status)
         log.info('PROFILE_LOADED name=%s file=%s',name,path)
+        if profile_changed:
+            self._invalidate_image_result_after_profile_change(name)
+
+    def _invalidate_image_result_after_profile_change(self, profile_name: str):
+        """Never show/use evidence produced under a previously loaded Golden.
+
+        Loaded photos may stay selected for convenience, but cached evidence,
+        overall result and manual-review candidates are invalidated and must be
+        re-analyzed under the newly selected Profile.
+        """
+        self.multi_image_result=None
+        try:self._manual_review_items=[]; self._manual_review_modes=[]
+        except Exception:pass
+        if hasattr(self,'image_tree'):
+            try:
+                for x in self.image_tree.get_children(): self.image_tree.delete(x)
+                self.image_overall.config(text='--',fg='black')
+                self.image_manual_list.delete(0,'end')
+                self.image_manual_pass_btn.config(state='disabled')
+                self.image_manual_refresh_btn.config(state='disabled')
+                n=len(getattr(self,'image_paths',[]) or [])
+                self.image_batch_var.set(f"Profile changed to {profile_name} | previous evidence cleared | {n} image(s) may be re-analyzed")
+                self.image_progress_var.set('Profile/Golden changed. Run / Analyze New before using results or Manual Review.')
+            except Exception:pass
+        log.info('IMAGE_SESSION_INVALIDATED profile=%s reason=PROFILE_OR_GOLDEN_CHANGED',profile_name)
 
     def _build_worker_snapshot(self, target):
         """MAIN THREAD ONLY: copy every worker input away from Tk/Tcl state."""
@@ -1978,11 +2018,13 @@ class App(tk.Tk):
             auto="CONFLICT" if item in result.conflicts else (ev.result if ev else "NEED_MORE_IMAGE")
             if auto in ("PASS","MANUAL_PASS"):
                 continue
-            if self.multi_image_engine._manual_review_allowed(item):
-                candidates.append((item,auto))
-        for item,auto in candidates:
-            self.image_manual_list.insert("end",f"[{auto}] {item}")
+            mode=self.multi_image_engine.manual_attention_mode(item)
+            candidates.append((item,auto,mode))
+        for item,auto,mode in candidates:
+            label="MANUAL PASS OK" if mode=="OVERRIDE_ALLOWED" else "REVIEW ONLY"
+            self.image_manual_list.insert("end",f"[{auto}] [{label}] {item}")
         self._manual_review_items=[x[0] for x in candidates]
+        self._manual_review_modes=[x[2] for x in candidates]
         state="normal" if candidates and not self.image_job_running else "disabled"
         try:self.image_manual_pass_btn.config(state=state); self.image_manual_refresh_btn.config(state="normal")
         except Exception:pass
@@ -2017,22 +2059,36 @@ class App(tk.Tk):
         return ''
 
     def _show_manual_golden_review(self, items: list[str], note: str):
-        """Golden-assisted human review without changing Legacy auto decisions."""
+        """Golden-assisted review for one non-PASS item.
+
+        Every non-PASS item can be inspected here. Only items explicitly
+        classified OVERRIDE_ALLOWED expose Confirm PASS; traceability items
+        remain REVIEW_ONLY and can be logged/kept/rechecked without silently
+        changing machine identity data.
+        """
         item=items[0]
+        mode=self.multi_image_engine.manual_attention_mode(item)
         actual_path=self._manual_review_image_path(item)
         golden_path=self._golden_review_image_path()
-        win=tk.Toplevel(self); win.title('Manual Review - Actual vs Golden / 人工復判對照'); win.geometry('1320x760'); win.transient(self)
+        win=tk.Toplevel(self); win.title('Manual Review - Actual vs Golden / 人工復判對照'); win.geometry('1320x790'); win.transient(self)
         top=ttk.Frame(win,padding=8); top.pack(fill='x')
         ttk.Label(top,text=f'Inspection Item: {item}',font=('Segoe UI',11,'bold')).pack(anchor='w')
         ev=self.multi_image_result.evidence.get(item) if self.multi_image_result else None
-        ttk.Label(top,text=f"Automatic: {(ev.result if ev else 'NEED_MORE_IMAGE')}   |   Reason: {(ev.message if ev else '')}",foreground='#555').pack(anchor='w',pady=(3,0))
+        auto='CONFLICT' if (self.multi_image_result and item in self.multi_image_result.conflicts) else (ev.result if ev else 'NEED_MORE_IMAGE')
+        actual=(ev.actual if ev else '')
+        expected=(ev.expected if ev else '')
+        ttk.Label(top,text=f"Mode: {mode}   |   Automatic: {auto}",foreground=('#8A5A00' if mode=='REVIEW_ONLY' else '#006400')).pack(anchor='w',pady=(3,0))
+        ttk.Label(top,text=f"Actual: {actual or '-'}   |   Expected: {expected or '-'}",foreground='#444').pack(anchor='w',pady=(2,0))
+        ttk.Label(top,text=f"Reason: {(ev.message if ev else 'No usable evidence')}",foreground='#555',wraplength=1260).pack(anchor='w',pady=(2,0))
+        if mode=='REVIEW_ONLY':
+            ttk.Label(top,text='REVIEW ONLY: this item is identity/barcode/consistency data and cannot be changed to PASS by a single visual click.',foreground='#A00000').pack(anchor='w',pady=(4,0))
         body=ttk.Frame(win,padding=8); body.pack(fill='both',expand=True)
         left=ttk.LabelFrame(body,text='Actual / 實拍',padding=6); right=ttk.LabelFrame(body,text='Golden Reference / Golden 對照',padding=6)
         left.pack(side='left',fill='both',expand=True,padx=(0,4)); right.pack(side='left',fill='both',expand=True,padx=(4,0))
         photos=[]
         def put_image(parent,path,empty):
             if not path or not os.path.exists(path):
-                ttk.Label(parent,text=empty,anchor='center').pack(fill='both',expand=True); return
+                ttk.Label(parent,text=empty,anchor='center',wraplength=560).pack(fill='both',expand=True); return
             try:
                 im=Image.open(path).convert('RGB'); im.thumbnail((620,560),Image.Resampling.LANCZOS)
                 ph=ImageTk.PhotoImage(im); photos.append(ph)
@@ -2041,20 +2097,38 @@ class App(tk.Tk):
             except Exception as exc:
                 ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
         put_image(left,actual_path,'No evidence image is available for this item.')
-        put_image(right,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual PASS.')
+        put_image(right,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual decision.')
         win._review_photos=photos
         buttons=ttk.Frame(win,padding=8); buttons.pack(fill='x')
         ttk.Label(buttons,text=f'Note: {note}').pack(side='left')
-        def confirm_pass():
+        def save_action(action):
             try:
-                self.multi_image_result=self.multi_image_engine.apply_manual_pass(self.multi_image_result,items,note)
+                self.multi_image_result=self.multi_image_engine.record_manual_review_action(self.multi_image_result,item,action,note)
                 self._render_multi_image_result(self.multi_image_result)
-                self.image_progress_var.set(f"Manual review saved | {len(items)} item(s) | {self.multi_image_result.overall}")
+                self.image_progress_var.set(f"Manual review logged | {item} | {action}")
                 win.destroy()
             except Exception as exc:
                 messagebox.showerror('Manual Review Error',str(exc),parent=win)
-        ttk.Button(buttons,text='Keep Auto Result / 保留自動判定',command=win.destroy).pack(side='right',padx=4)
-        ttk.Button(buttons,text='Confirm PASS / 人工確認PASS',command=confirm_pass).pack(side='right',padx=4)
+        def confirm_pass():
+            try:
+                self.multi_image_result=self.multi_image_engine.apply_manual_pass(self.multi_image_result,[item],note)
+                self.multi_image_result.manual_reviews.append({
+                    'timestamp':datetime.now().isoformat(timespec='seconds'),'item':item,'action':'CONFIRM_PASS',
+                    'mode':mode,'auto_result':auto,'final_result':'MANUAL_PASS','note':note,
+                    'source_image':actual_path,'actual':actual,'expected':expected,
+                })
+                self.multi_image_result.report_path=self.multi_image_engine._write_excel(self.multi_image_result,self.multi_image_result.expected_work_order or {})
+                pathlib.Path(self.multi_image_result.session_dir,'result.json').write_text(json.dumps(self.multi_image_engine._serialize(self.multi_image_result),ensure_ascii=False,indent=2),encoding='utf-8')
+                self._render_multi_image_result(self.multi_image_result)
+                self.image_progress_var.set(f"Manual PASS saved | {item} | {self.multi_image_result.overall}")
+                win.destroy()
+            except Exception as exc:
+                messagebox.showerror('Manual Review Error',str(exc),parent=win)
+        ttk.Button(buttons,text='Keep Auto / 保留自動判定',command=lambda:save_action('KEEP_AUTO')).pack(side='right',padx=4)
+        ttk.Button(buttons,text='Confirm FAIL / 人工確認FAIL',command=lambda:save_action('CONFIRM_FAIL')).pack(side='right',padx=4)
+        ttk.Button(buttons,text='Recheck / 重新辨識',command=lambda:(save_action('REQUEST_RECHECK'), self.after(100,self.recheck_unresolved))).pack(side='right',padx=4)
+        if mode=='OVERRIDE_ALLOWED':
+            ttk.Button(buttons,text='Confirm PASS / 人工確認PASS',command=confirm_pass).pack(side='right',padx=4)
 
     def manual_review_selected(self):
         if self.image_job_running:
@@ -2063,11 +2137,12 @@ class App(tk.Tk):
             messagebox.showinfo("Manual Review","Run Image Label Inspection first."); return
         sels=list(self.image_manual_list.curselection())
         if not sels:
-            messagebox.showwarning("Manual Review","Select one or more visual items first."); return
+            messagebox.showwarning("Manual Review","Select one non-PASS item first."); return
         items=[self._manual_review_items[i] for i in sels if i < len(self._manual_review_items)]
         if not items:return
+        items=items[:1]  # one Golden/actual decision at a time for traceability
         note=(self.image_manual_note_var.get() or "Visual inspection confirmed").strip()
-        # V1.9.5: show actual evidence and Golden reference before the operator
+        # V1.9.8: show actual evidence and Golden reference before the operator
         # decides. Automatic evidence/result remains unchanged unless PASS is
         # explicitly confirmed.
         self._show_manual_golden_review(items,note)
@@ -2180,7 +2255,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.5 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.8 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

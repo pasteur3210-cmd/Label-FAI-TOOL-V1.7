@@ -417,9 +417,38 @@ def _rules_from_golden_text(text: str) -> dict:
     key=re.search(r'(?:WiFi\s*Key|\bKey)\s*:\s*(X{4,}|[A-Z0-9]{6,32})',t,re.I)
     if key:
         rules['wifi_key_length']=len(key.group(1))
+    # Controlled Request Forms often specify the key as 'Random 10 digits'
+    # rather than showing a Golden sample. This explicit rule must win.
+    km=re.search(r'WiFi\s*Key\s*:\s*Random\s*(\d{1,2})\s*(?:digits|characters|char|碼)?',t,re.I)
+    if km:
+        rules['wifi_key_length']=int(km.group(1))
+    # Generic SSID forms may put the example on the next line: SSID / ComtrendXXXX.
+    if not rules.get('ssid_prefix'):
+        sm=re.search(r'\bSSID\b\s+([A-Za-z][A-Za-z0-9_-]*?)(X{3,})',str(text or ''),re.I)
+        if sm:
+            rules['ssid_prefix']=sm.group(1)
+    suffix=re.search(r'last\s+(\d{1,2})\s+(?:digits|characters|chars?)\s+of\s+(?:the\s+)?MAC',t,re.I)
+    if suffix:
+        rules['ssid_mac_suffix_length']=int(suffix.group(1))
+    # Test-programming QR content is defined by the Golden request form.
+    qm=re.search(r'QR\s*Code[^\n\r]{0,160}',str(text or ''),re.I)
+    if qm:
+        qlow=qm.group(0).lower(); qfields=[]
+        if 's/n' in qlow or 'sn' in qlow: qfields.append('sn')
+        if 'mac' in qlow: qfields.append('mac')
+        if 'wifi key' in qlow or 'wifikey' in qlow: qfields.append('wifi_key')
+        if 'ssid' in qlow: qfields.append('ssid')
+        if qfields: rules['qr_payload_fields']=qfields
+    # S/N length is explicitly controlled in these forms (e.g. Comtrend 20 碼).
+    snm=re.search(r'S\s*/\s*N\s*Number.*?Comtrend\s*\((\d{1,2})\s*碼\)',t,re.I)
+    if snm:
+        n=int(snm.group(1)); rules['sn_regex']=rf'[A-Z0-9-]{{{n}}}'; rules['sn_display']=f'{n} A-Z / 0-9 / -'
     countries=[]
-    for c in ('China','Taiwan'):
-        if re.search(r'Made\s+in\s+'+c,t,re.I): countries.append(c)
+    if re.search(r'Made\s+in\s+Taiwan\s*/\s*China|Made\s+in\s+China\s*/\s*Taiwan',t,re.I):
+        countries=['China','Taiwan']
+    else:
+        for c in ('China','Taiwan'):
+            if re.search(r'Made\s+in\s+'+c,t,re.I): countries.append(c)
     if countries: rules['made_in_allowed']=countries
     return rules
 
@@ -465,7 +494,7 @@ def _standard_item_candidates(text: str) -> list[dict]:
 def _dynamic_item_rows(profile: dict) -> list[dict]:
     """Return Visual Profile rows. Golden form items are primary.
 
-    V1.9.5 deliberately does not flood the table with automatically inferred
+    V1.9.8 deliberately does not flood the table with automatically inferred
     Standard checks. Standard checks appear only after the engineer adds them
     from the Standard Library.
     """
@@ -606,22 +635,30 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     # Golden identity is canonical and cannot inherit a seed model name.
     base_name=identity['display_name']
     root=external_profile_dir()/'golden_assets'/identity['file_stem']
-    root.mkdir(parents=True,exist_ok=True)
+    # V1.9.8 stale-Golden guard: build the newly imported asset set in a fresh
+    # transaction directory.  Re-importing the same Model/Label P/N must never
+    # leave images/templates from the previous Golden in the canonical folder.
+    # The canonical folder is replaced only after the new Profile has passed
+    # identity/structure checks, so a failed import cannot destroy the last
+    # usable Golden assets.
+    tx_root=root.parent/f".{identity['file_stem']}__incoming_{os.getpid()}_{datetime.now().strftime('%H%M%S%f')}"
+    if tx_root.exists():
+        shutil.rmtree(tx_root,ignore_errors=True)
+    tx_root.mkdir(parents=True,exist_ok=True)
 
-    # Move/copy extracted staging media into the canonical asset directory.
+    tx_images=[]
     canonical_images=[]
     for img in images:
-        dst=root/'imported_media'/img.name
-        dst.parent.mkdir(parents=True,exist_ok=True)
-        if img.resolve() != dst.resolve():
-            shutil.copy2(img,dst)
-        canonical_images.append(dst)
-    images=canonical_images
+        tx_dst=tx_root/'imported_media'/img.name
+        tx_dst.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(img,tx_dst)
+        tx_images.append(tx_dst)
+        canonical_images.append(root/'imported_media'/img.name)
 
     # The request-form body often stores the actual approved label as an
     # embedded image. OCR those images once during import so inspection items
     # are derived from the Golden, not from the seed profile.
-    image_ocr_text,image_ocr_rows=_ocr_golden_images(images)
+    image_ocr_text,image_ocr_rows=_ocr_golden_images(tx_images)
     source_text=text
     if image_ocr_text:
         text=(text + '\n' + image_ocr_text).strip()
@@ -629,7 +666,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.5',
+        'profile_version':'1.9.8',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -654,8 +691,8 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     })
     if identity['model']:
         profile.setdefault('fixed_fields',{})['model']=identity['model']
-    (root/'golden_text.txt').write_text(text,encoding='utf-8')
-    # V1.9.5: controlled Request Forms are parsed item-by-item. Every numbered
+    (tx_root/'golden_text.txt').write_text(text,encoding='utf-8')
+    # V1.9.8: controlled Request Forms are parsed item-by-item. Every numbered
     # Golden item is retained in Profile review; unknown semantics become
     # Needs Review instead of disappearing. Standard engine checks are mapped
     # behind the Golden row or added explicitly from Standard Library.
@@ -684,27 +721,60 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
         'missing_item_numbers':[],
     }
     profile['rules']=_rules_from_golden_text(text)
-    profile['model_aliases']=[identity['model']]
-    profile['customer_model']=''
+    # Keep internal model and selected customer model as aliases. The Golden
+    # form uses a filled square to indicate which printed model name is used.
+    customer_model=''
+    internal_model=identity['model']
+    for _row in form_items:
+        raw=str(_row.get('raw_text',''))
+        if _row.get('form_no')==6 or 'model name' in raw.lower():
+            cm=re.search(r'■\s*\(客戶\)\s*([A-Za-z0-9_.-]+)',raw,re.I)
+            im=re.search(r'(?:■|□)\s*\(康全\)\s*([A-Za-z0-9_.-]+)',raw,re.I)
+            if cm: customer_model=cm.group(1)
+            if im and not internal_model: internal_model=im.group(1)
+            break
+    profile['customer_model']=customer_model
+    profile['model_aliases']=list(dict.fromkeys([x for x in (identity['model'],customer_model) if x]))
     # Import itself is not a manual edit; retain a clean audit marker.
     profile['profile_edit_log']=[{
         'edited_at':datetime.now().isoformat(timespec='seconds'),
         'action':'AUTO_GOLDEN_IMPORT','item_count':len(rows),
         'document_item_count':len(form_items),
     }]
-    layout=_largest_image(images)
+    layout=_largest_image(tx_images)
     if layout:
-        profile.setdefault('golden_import',{})['candidate_layout_image']=str(layout)
-    profile['golden_import']['embedded_image_count']=len(images)
+        try:
+            rel=layout.relative_to(tx_root)
+            profile.setdefault('golden_import',{})['candidate_layout_image']=str(root/rel)
+        except Exception:
+            profile.setdefault('golden_import',{})['candidate_layout_image']=str(root/'imported_media'/layout.name)
+    profile['golden_import']['embedded_image_count']=len(tx_images)
+    profile['golden_import']['import_generation']=source_sha[:12]
 
     out=external_profile_dir()/f"{identity['file_stem']}.json"
-    out.write_text(json.dumps(profile,ensure_ascii=False,indent=2),encoding='utf-8')
-    errors=dynamic_identity_errors(profile,out)
+    errors=validate_profile_structure(profile,out)
     if errors:
-        try:
-            out.unlink(missing_ok=True)
-        finally:
-            raise RuntimeError('Imported Golden identity check failed: ' + '; '.join(errors))
+        shutil.rmtree(tx_root,ignore_errors=True)
+        raise RuntimeError('Imported Golden profile check failed: ' + '; '.join(errors))
+
+    # Commit assets first, then JSON. Any previous asset directory for this
+    # exact identity is removed in one controlled step so stale media cannot
+    # be selected by Manual Review after re-import.
+    backup=None
+    try:
+        if root.exists():
+            backup=root.parent/f".{root.name}__backup_{os.getpid()}"
+            if backup.exists(): shutil.rmtree(backup,ignore_errors=True)
+            root.rename(backup)
+        tx_root.rename(root)
+        out.write_text(json.dumps(profile,ensure_ascii=False,indent=2),encoding='utf-8')
+        if backup and backup.exists(): shutil.rmtree(backup,ignore_errors=True)
+    except Exception:
+        if root.exists() and root != tx_root:
+            shutil.rmtree(root,ignore_errors=True)
+        if backup and backup.exists(): backup.rename(root)
+        shutil.rmtree(tx_root,ignore_errors=True)
+        raise
     return out,profile
 
 
@@ -787,7 +857,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.5'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.8'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})

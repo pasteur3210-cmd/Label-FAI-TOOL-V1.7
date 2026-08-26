@@ -105,16 +105,19 @@ def validate(fields: Dict[str, str], profile: Dict, expected_work_order=None) ->
         ssid = fields.get("ssid", "")
         ssid_prefix = rules.get("ssid_prefix", "")
         if ssid_prefix:
+            suffix_len=int(rules.get('ssid_mac_suffix_length',6) or 6)
+            mask='X'*suffix_len
             if ssid:
-                ssid_syntax=bool(re.fullmatch(re.escape(ssid_prefix)+r"[0-9A-F]{6}",ssid,re.I))
-                out.append(_fr("Variable: SSID Format",ssid,ssid_prefix+"XXXXXX","PASS" if ssid_syntax else "FAIL","" if ssid_syntax else "SSID format invalid","" if ssid_syntax else "FMT-SSID"))
+                ssid_syntax=bool(re.fullmatch(re.escape(ssid_prefix)+rf"[0-9A-F]{{{suffix_len}}}",ssid,re.I))
+                out.append(_fr("Variable: SSID Format",ssid,ssid_prefix+mask,"PASS" if ssid_syntax else "FAIL","" if ssid_syntax else "SSID format invalid","" if ssid_syntax else "FMT-SSID"))
             else:
-                out.append(_fr("Variable: SSID Format","",ssid_prefix+"XXXXXX","WARN","SSID not recognized","OCR-SSID"))
+                out.append(_fr("Variable: SSID Format","",ssid_prefix+mask,"WARN","SSID not recognized","OCR-SSID"))
             if mac and ssid:
-                exp=ssid_prefix+mac[-6:]
-                out.append(_fr("Rule: SSID = MAC Last 6",ssid,exp,"PASS" if ssid==exp else "FAIL","" if ssid==exp else "SSID suffix does not match MAC","" if ssid==exp else "RULE-SSID-MAC"))
-            else:
-                out.append(_fr("Rule: SSID = MAC Last 6",ssid,"Need MAC + SSID","WARN","Cannot evaluate relation"))
+                exp=ssid_prefix+mac[-suffix_len:]
+                rule_name=f"Rule: SSID = MAC Last {suffix_len}"
+                out.append(_fr(rule_name,ssid,exp,"PASS" if ssid==exp else "FAIL","" if ssid==exp else "SSID suffix does not match MAC","" if ssid==exp else "RULE-SSID-MAC"))
+            elif any(str(x).startswith('Rule: SSID = MAC Last') for x in required):
+                out.append(_fr(f"Rule: SSID = MAC Last {suffix_len}",ssid,"Need MAC + SSID","WARN","Cannot evaluate relation"))
 
     if needs("Rule: GPON S/N = Prefix + MAC Last 8"):
         gpon=fields.get("gpon_sn","")
@@ -142,8 +145,18 @@ def validate(fields: Dict[str, str], profile: Dict, expected_work_order=None) ->
         wifi_qr=fields.get("wifi_qr","")
         ssid=fields.get("ssid","")
         if wifi_qr:
-            qr_ok=bool(re.fullmatch(r"WIFI:T:WPA;S:[^;]+;P:[^;]+;;",wifi_qr))
-            out.append(_fr("Variable: WiFi QR Format",wifi_qr,"WIFI:T:WPA;S:<SSID>;P:<WiFi Key>;;","PASS" if qr_ok else "FAIL","" if qr_ok else "WiFi QR syntax invalid","" if qr_ok else "FMT-WIFIQR"))
+            payload_fields=list(rules.get('qr_payload_fields',[]) or [])
+            if payload_fields:
+                fact_map={'sn':'qr_sn','mac':'qr_mac','wifi_key':'qr_wifi_key','ssid':'qr_ssid'}
+                missing=[x for x in payload_fields if not fields.get(fact_map.get(x,''))]
+                qr_ok=not missing
+                expected_qr='QR contains: '+', '.join(payload_fields)
+                out.append(_fr("Variable: WiFi QR Format",wifi_qr,expected_qr,"PASS" if qr_ok else "FAIL",
+                               "" if qr_ok else 'Missing QR fields: '+', '.join(missing),
+                               "" if qr_ok else "FMT-WIFIQR"))
+            else:
+                qr_ok=bool(re.fullmatch(r"WIFI:T:WPA;S:[^;]+;P:[^;]+;;",wifi_qr))
+                out.append(_fr("Variable: WiFi QR Format",wifi_qr,"WIFI:T:WPA;S:<SSID>;P:<WiFi Key>;;","PASS" if qr_ok else "FAIL","" if qr_ok else "WiFi QR syntax invalid","" if qr_ok else "FMT-WIFIQR"))
             qssid=fields.get("qr_ssid","")
             qkey=fields.get("qr_wifi_key","")
             if (not required) or "Consistency: QR SSID vs Printed SSID" in required:
@@ -157,7 +170,9 @@ def validate(fields: Dict[str, str], profile: Dict, expected_work_order=None) ->
                 else:
                     out.append(_fr("Consistency: QR Key vs Printed WiFi Key",qkey,"Printed WiFi Key unavailable","WARN","Cannot cross-check"))
         elif (not required) or "Variable: WiFi QR Format" in required:
-            out.append(_fr("Variable: WiFi QR Format","","WIFI:T:WPA;S:<SSID>;P:<WiFi Key>;;","WARN","WiFi QR not decoded","DEC-WIFIQR"))
+            payload_fields=list(rules.get('qr_payload_fields',[]) or [])
+            exp=('QR contains: '+', '.join(payload_fields)) if payload_fields else "WIFI:T:WPA;S:<SSID>;P:<WiFi Key>;;"
+            out.append(_fr("Variable: WiFi QR Format","",exp,"WARN","WiFi QR not decoded","DEC-WIFIQR"))
 
     # Vision fixed graphics remain staged for next version.
     for title in ("Fixed Graphic: COMTREND Logo", "Fixed Graphic: RoHS Logo", "Fixed Graphic: CE Logo", "Fixed Graphic: WEEE Logo", "Fixed Graphic: Green Dot Logo"):
