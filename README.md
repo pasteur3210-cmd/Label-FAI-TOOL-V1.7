@@ -1,19 +1,42 @@
-# Label Auto Inspection Tool V1.9.13
+# Label Auto Inspection Tool V1.9.15
 
-## V1.9.13 Factory Validation Release
+## V1.9.15 Form-Driven Multi-Golden Factory Release
+
+- Controlled Label Request Form numbers (1..N) are now the authoritative inspection-item list.
+- Word list numbering is reconstructed after legacy DOC -> DOCX conversion, so older forms do not lose item numbers.
+- Nested numbered password/rule lists remain attached to their parent item instead of becoming fake label items.
+- Empty numbered items are retained as `Needs Review` and cannot be silently bypassed.
+- Barcode/QR requirements are mandatory. Known S/N/MAC/GPON barcodes use field-safe mapping; undefined code semantics remain in operator review.
+- Composite items such as WiFi Key + QR retain both the printed-field check and QR presence/review path.
+- Final Label reference is selected structurally from the image placed after `Label Example`, preventing password/procedure screenshots from becoming the manual-review Golden image.
+- Manual Review continues to show the Final Label plus the exact numbered Request-Form specification.
+- Dynamic Golden remains isolated from Legacy model-specific rules; Legacy CAM/Image behavior remains under the existing regression suite.
+
+## V1.9.15 Final Label + Item Specification Manual Review Fix
+
+This release fixes a factory-review regression where MAC, Made-in and other Golden items could show an unrelated embedded support screenshot (for example a password proposal) as the Golden reference. Manual Review now separates the controlled document into two references:
+
+1. **Final Label / Full Golden** – the embedded image that best matches a printed label, selected by label-field anchors and QR/barcode evidence rather than file size.
+2. **Golden Item Specification** – the exact numbered Request-Form item text for the field being reviewed.
+
+Focus Item is restricted to OCR/code geometry from the selected Final Label image only. Support screenshots are never eligible for field focus. If a reliable Final Label ROI cannot be located, the full Final Label remains visible instead of showing a guessed crop.
+
+Legacy CAM/Image automatic inspection modules are unchanged from V1.9.13; this release changes Golden import/review selection and Manual Review presentation only.
+
+## V1.9.15 Factory Validation Release
 
 This release freezes the validated Legacy CAM/Image decision engines and completes the Manual Review Golden-reference workflow. The complete Golden label is always the initial view, and the currently reviewed item is highlighted when a reliable location can be derived. Golden Text and machine-code items use their typed ROI; COMTREND/WEEE and other known artwork use conservative review-only locators without changing automatic PASS/FAIL. `Full Golden / 完整Golden` now actively resets and fits the complete Golden with the current-item highlight, while `Focus Item / 項目放大` is enabled only for a reliable focus ROI. Suggested-only artwork areas remain highlighted on Full Golden but cannot be focused, preventing a misleading crop.
 
-Release gates cover Dynamic Golden completeness, mandatory Barcode/QR non-bypass, stale-profile isolation, QR fusion, operator-attention traceability, Python 3.11 compatibility, package hygiene, and the V1.9.13 strict Artwork ROI safety regression.
+Release gates cover Dynamic Golden completeness, mandatory Barcode/QR non-bypass, stale-profile isolation, QR fusion, operator-attention traceability, Python 3.11 compatibility, package hygiene, and the V1.9.15 strict Artwork ROI safety regression.
 
-## V1.9.13 Manual Review Responsive UI Hotfix
+## V1.9.15 Manual Review Responsive UI Hotfix
 - Manual-review decision controls moved above the Actual/Golden images, so Windows taskbar/display scaling cannot hide them.
 - Popup geometry is calculated from the current screen instead of fixed 1320x790.
 - Confirm PASS remains visible for every item; REVIEW_ONLY items show it disabled rather than making the button disappear.
 - Legacy CAM/Image detection logic and Dynamic Golden decision logic are unchanged.
 
 
-## V1.9.13 Operator-Attention + Clean Golden Reload Integration
+## V1.9.15 Operator-Attention + Clean Golden Reload Integration
 
 This release keeps the validated automatic CAM/Image decision rules intact while hardening the Dynamic Golden integration and making manual review usable as a production fallback.
 
@@ -32,6 +55,6 @@ This release keeps the validated automatic CAM/Image decision rules intact while
 - One item is reviewed at a time so the displayed Actual/Golden pair always corresponds to the decision being recorded.
 
 ### Regression protection
-Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.13 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
+Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.15 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
 
 GitHub Actions uses Python 3.11, workspace cleanup, release gate, end-to-end integration gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.

@@ -63,7 +63,7 @@ def test_comtrend_artwork_uses_exact_ocr_marker_not_unrelated_text(tmp_path):
 def test_full_golden_button_re_renders_with_highlight_and_focus_is_optional():
     src=Path('label_tool/app.py').read_text(encoding='utf-8')
     fn=src[src.index('    def _show_manual_golden_review'):src.index('    def manual_review_selected')]
-    assert "render_golden(None,'Full Golden reference',golden_crop)" in fn
+    assert "render_golden(None,'Final Label / Full Golden reference',golden_crop)" in fn
     assert 'REVIEW: {item}' in fn
     assert "view_state.set('Full Golden / 完整Golden')" in fn
     assert "view_state.set('Focus Item / 項目放大')" in fn

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = '1.9.13'
+EXPECTED_VERSION = '1.9.15'
 REQUIRED = [
     '.github/workflows/build.yml',
     'label_tool/__init__.py',
@@ -70,48 +70,54 @@ def main() -> int:
     if 'dynamic_identity_errors' not in gp or 'profile_identity' not in gp:
         fail('Dynamic Golden identity consistency gate is missing')
     if '_clean_engine_template(base_profile)' not in gp:
-        fail('V1.9.13 clean Dynamic Golden engine-template boundary is missing')
+        fail('V1.9.15 clean Dynamic Golden engine-template boundary is missing')
     if 'profile=deepcopy(base_profile)' in gp.replace(' ', ''):
         fail('Dynamic Golden still directly deep-copies a model-specific seed profile')
     if 'apply_editable_items' not in gp or '_dynamic_item_rows' not in gp:
         fail('Visual Profile Editor data model is missing')
 
     if 'extract_golden_form_items' not in gp or 'golden_completeness' not in gp:
-        fail('V1.9.13 numbered Golden completeness parser is missing')
+        fail('V1.9.15 numbered Golden completeness parser is missing')
     if 'STANDARD_LIBRARY' not in gp or 'validation_readiness_errors' not in gp:
-        fail('V1.9.13 Standard Library / validation readiness gate is missing')
+        fail('V1.9.15 Standard Library / validation readiness gate is missing')
     if '_show_manual_golden_review' not in app or 'Golden Reference / Golden 對照' not in app:
-        fail('V1.9.13 Golden-assisted Manual Review UI is missing')
+        fail('V1.9.15 Golden-assisted Manual Review UI is missing')
     if 'Review with Golden / Golden對照復判' not in app:
-        fail('V1.9.13 Manual Review button does not visibly expose Golden comparison')
+        fail('V1.9.15 Manual Review button does not visibly expose Golden comparison')
     if '_golden_review_artwork_marker' not in app or 'showing full Golden' not in app or 'artwork_review_roi' not in app:
-        fail('V1.9.13 strict Artwork Golden-reference safety/marker rule is missing')
+        fail('V1.9.15 strict Artwork Golden-reference safety/marker rule is missing')
     if 'Full Golden / 完整Golden' not in app or 'Focus Item / 項目放大' not in app:
-        fail('V1.9.13 Manual Review full-Golden/default + optional-focus controls are missing')
-    if "render_golden(None,'Full Golden reference',golden_crop)" not in app:
-        fail('V1.9.13 Manual Review does not default to the complete Golden image with current-item highlight')
+        fail('V1.9.15 Manual Review full-Golden/default + optional-focus controls are missing')
+    if "render_golden(None,'Final Label / Full Golden reference',golden_crop)" not in app:
+        fail('V1.9.15 Manual Review does not default to the complete Golden image with current-item highlight')
     if 'REVIEW: {item}' not in app or 'golden_focus_allowed=bool(golden_crop)' not in app:
-        fail('V1.9.13 Golden current-item highlight / safe Focus policy is missing')
+        fail('V1.9.15 Golden current-item highlight / safe Focus policy is missing')
+    if 'Golden Item Specification / Golden 項目說明' not in app or '_golden_item_specification' not in app:
+        fail('V1.9.15 item-specific Golden specification panel is missing')
+    if 'select_final_label_image' not in gp or 'candidate_layout_policy' not in gp:
+        fail('V1.9.15 final-label image selection guard is missing')
+    if 'FINAL Label image' not in app or 'support screenshot' not in app:
+        fail('V1.9.15 manual review is not isolated from support screenshots')
 
 
     pm=(ROOT/'label_tool/core/profile_manager.py').read_text(encoding='utf-8')
     parser=(ROOT/'label_tool/core/parser.py').read_text(encoding='utf-8')
     if '_display_name' not in pm or 'label_pn' not in pm:
-        fail('V1.9.13 unique Dynamic Profile UI key guard is missing')
+        fail('V1.9.15 unique Dynamic Profile UI key guard is missing')
     if '_parse_ocr_fields_dynamic' not in parser or 'profile=self.profile' not in (ROOT/'label_tool/core/multi_image_inspection.py').read_text(encoding='utf-8'):
-        fail('V1.9.13 profile-aware Dynamic Image parser is missing')
+        fail('V1.9.15 profile-aware Dynamic Image parser is missing')
     if 'qr_payload_fields' not in gp or 'ssid_mac_suffix_length' not in gp:
-        fail('V1.9.13 Golden runtime rule extraction is missing')
+        fail('V1.9.15 Golden runtime rule extraction is missing')
 
     mi=(ROOT/'label_tool/core/multi_image_inspection.py').read_text(encoding='utf-8')
     if 'manual_attention_mode' not in mi or 'manual_reviews' not in mi:
-        fail('V1.9.13 all-non-PASS operator-attention/traceability model is missing')
+        fail('V1.9.15 all-non-PASS operator-attention/traceability model is missing')
     if 'mode=self.multi_image_engine.manual_attention_mode(item)' not in app or 'REVIEW ONLY' not in app:
-        fail('V1.9.13 Manual Review list does not expose review-only non-PASS items')
+        fail('V1.9.15 Manual Review list does not expose review-only non-PASS items')
     if 'IMAGE_SESSION_INVALIDATED' not in app:
-        fail('V1.9.13 profile/Golden change does not invalidate previous Image result')
+        fail('V1.9.15 profile/Golden change does not invalidate previous Image result')
     if '__incoming_' not in gp or 'backup=root.parent' not in gp:
-        fail('V1.9.13 transactional Golden asset replacement guard is missing')
+        fail('V1.9.15 transactional Golden asset replacement guard is missing')
 
     print(f'[RELEASE_GATE][PASS] version={EXPECTED_VERSION} python311_files={parsed} required_files={len(REQUIRED)}')
     return 0

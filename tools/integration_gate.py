@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.13 integration gate.
+"""V1.9.15 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -73,6 +73,52 @@ def main() -> int:
     ce = next(r for r in rows if r['form_no'] == 4)
     check(ce['required'] is False, 'CE ■ No checkbox did not remain Not Required')
 
+
+    # 1b) Cross-model form-driven regression: nested numbering must not create
+    # fake inspection items; blank top-level items are retained; composite WiFi
+    # Key + QR remains one form item with a mandatory QR review path.
+    golden_4297 = '''
+Label Request:
+1. Comtrend logo
+2. GPON VoIP Gateway
+3. Model: GRG-4297u
+4. P/N: 738125-00X
+5. Input: 12V 1.5A
+USB 2.0: 5V 500mA
+6. IP Address: 192.168.1.1
+7. Username: user
+8. Password: Random 8 characters
+1. nested password rule
+2. nested password rule two
+9. SSID=Telekom Slovenije_XXXXXX
+10. WiFi Key: Random 14 碼
+Barcode type：QR Code
+QR Code內容: WIFI:T:WPA;S:SSID;P:WiFi Key;;
+11. S/N: YYM4297UF-FFXXXXXX (18 characters)
+Barcode type：Code 128
+12. MAC: Comtrend mac address (一台10個MAC)
+Barcode type：Code 128
+13. GPON S/N: 434D5444XXXXXXXX (16 characters)
+Barcode type：Code 128
+14. Made in China/Taiwan
+15. Comtrend Central Europe, s.r.o.
+16. 安規Logo：
+17.
+18. password proposal reference
+19. QR Code for test，內容含 SN、MAC、Password、WiFi Key
+20. print-method reference
+Finished Information:
+'''
+    r4297=extract_golden_form_items(golden_4297)
+    check([r['form_no'] for r in r4297] == list(range(1,21)), 'GRG-4297 top-level form sequence 1..20 is incomplete')
+    check('nested password rule' in r4297[7]['raw_text'], 'Nested rule numbering escaped parent item #8')
+    check(r4297[9]['type']=='Golden Variable' and r4297[9].get('machine_code_field')=='qr', 'WiFi Key + QR composite item was misclassified')
+    check(r4297[10].get('machine_code_field')=='sn', 'S/N barcode field mapping failed')
+    check(r4297[11].get('machine_code_field')=='mac', 'MAC barcode field mapping failed')
+    check(r4297[12].get('machine_code_field')=='gpon_sn', 'GPON barcode field mapping failed')
+    check(r4297[16]['type']=='Needs Review', 'Blank controlled item #17 was bypassed')
+    check(r4297[18]['type']=='Golden QR' and not r4297[18].get('machine_code_rule_known'), 'Unsupported Password-containing QR should require manual review')
+
     # 2) Golden-backed profile generation must be clean and runtime-oriented.
     rules = _rules_from_golden_text(GOLDEN)
     check(rules.get('wifi_key_length') == 10, 'WiFi Key length rule was not extracted')
@@ -127,7 +173,7 @@ def main() -> int:
     # Field-record regression: session fusion must preserve normalized QR S/N +
     # MAC facts and must not turn a single-image QR PASS into a conflict.
     fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
-    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.13')
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.15')
     mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
     mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
     best={}; conflicts={}
@@ -161,8 +207,9 @@ def main() -> int:
         check(token in app, f'Item-aware Golden review is missing: {token}')
     check('showing full Golden' in app and '_golden_review_artwork_marker' in app, 'Artwork fallback/marker safety is missing')
     check('artwork_review_roi' in app, 'Artwork focus is not restricted to an explicit verified ROI')
-    check("render_golden(None,'Full Golden reference',golden_crop)" in app, 'Manual Review does not start on the complete Golden with current-item marker')
+    check("render_golden(None,'Final Label / Full Golden reference',golden_crop)" in app, 'Manual Review does not start on the complete Final Label with current-item marker')
     check('REVIEW: {item}' in app and 'golden_focus_allowed=bool(golden_crop)' in app, 'Golden current-item highlight / safe Focus policy missing')
+    check('Golden Item Specification / Golden 項目說明' in app and '_golden_item_specification' in app, 'Golden item-specific specification panel missing')
     check('if role == "FULL" and not self.profile.get("dynamic_profile"):' in mi, 'Dynamic FULL path can still execute Legacy seed inspection')
     check('direct_rows=[r for r in direct_rows if r.name in dynamic_required]' in mi, 'Dynamic evidence is not filtered to current Profile requirements')
     check('"qr_sn", "qr_mac"' in mi, 'QR normalized S/N/MAC facts are not persisted into session fusion')
@@ -181,10 +228,13 @@ def main() -> int:
     # asset directory. This prevents old embedded label images being shown in
     # Golden-assisted Manual Review.
     gp=(ROOT/'label_tool/core/golden_profile_manager.py').read_text(encoding='utf-8')
+    check('select_final_label_image' in gp and 'candidate_layout_policy' in gp, 'Final Label selector guard missing')
     check('__incoming_' in gp and 'backup=root.parent' in gp, 'Transactional Golden asset replacement guard missing')
     check('_detect_golden_machine_codes' in gp and 'Golden Machine Code:' in gp, 'Golden Barcode/QR non-bypass detector is missing')
+    check('_docx_final_label_media_names' in gp and 'document:Label Example' in gp, 'Final Label structural document-position guard is missing')
+    check('counters[key]=counters.get(key,0)+1' in gp, 'Word list-number reconstruction guard is missing')
 
-    print('[INTEGRATION_GATE][PASS] Golden completeness, barcode/QR non-bypass, dynamic isolation, QR fusion, item-aware review, stale-Golden isolation')
+    print('[INTEGRATION_GATE][PASS] form-driven multi-model completeness, barcode/QR non-bypass, dynamic isolation, QR fusion, item-aware review, stale-Golden isolation')
     return 0
 
 
