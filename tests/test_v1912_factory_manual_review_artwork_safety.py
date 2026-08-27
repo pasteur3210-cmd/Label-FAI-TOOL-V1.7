@@ -90,5 +90,5 @@ def test_manual_review_defaults_to_full_golden_and_has_optional_focus_controls()
     fn = src[src.index('    def _show_manual_golden_review'):src.index('    def manual_review_selected')]
     assert "Full Golden / 完整Golden" in fn
     assert "Focus Item / 項目放大" in fn
-    assert "render_golden(None,'Full Golden reference')" in fn
-    assert "if not golden_crop:" in fn and "focus_btn.config(state='disabled')" in fn
+    assert "render_golden(None,'Full Golden reference',golden_crop)" in fn
+    assert 'golden_focus_allowed=bool(golden_crop)' in fn and "focus_btn.config(state='disabled')" in fn
