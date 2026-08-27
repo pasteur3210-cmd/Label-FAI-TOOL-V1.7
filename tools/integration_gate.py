@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.15 integration gate.
+"""V1.9.16 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -173,7 +173,7 @@ Finished Information:
     # Field-record regression: session fusion must preserve normalized QR S/N +
     # MAC facts and must not turn a single-image QR PASS into a conflict.
     fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
-    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.15')
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.16')
     mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
     mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
     best={}; conflicts={}
@@ -186,11 +186,13 @@ Finished Information:
     b = {'profile_name': 'VG-8043u Chassis Label', 'dynamic_profile': True, 'label_pn': '680010-375'}
     check(_display_name(a, Path('a.json')) != _display_name(b, Path('b.json')), 'Dynamic Profile display key collides across Golden P/Ns')
 
-    # 5) Required unresolved/unknown Golden items must block Validate rather than disappear.
+    # 5) Required unresolved/unknown Golden items are allowed to Validate
+    # when MANUAL REVIEW is the explicit traceable handling path. They must
+    # remain present and must never be silently bypassed.
     unknown = {'dynamic_profile': True,
-               'golden_form_items': [{'form_no': 1, 'item': 'Golden #1: Unknown Mark', 'type': 'Needs Review', 'required': True, 'engine_items': []}],
-               'golden_completeness': {'document_item_count': 1, 'missing_item_numbers': []}}
-    check(bool(validation_readiness_errors(unknown)), 'Required unknown Golden item did not block Validate')
+               'golden_form_items': [{'form_no': 1, 'item': 'Golden #1: Unknown Mark', 'type': 'Needs Review', 'required': True, 'engine_items': [], 'manual_review_allowed': True}],
+               'golden_completeness': {'document_item_count': 1, 'profile_item_count': 1, 'document_item_numbers':[1], 'missing_item_numbers': []}}
+    check(not validation_readiness_errors(unknown), 'Required unknown Golden item with MANUAL path incorrectly blocked Validate')
 
     # 6) Manual review UI must visibly require Golden comparison before PASS,
     # and every non-PASS item must enter operator attention (review-only when

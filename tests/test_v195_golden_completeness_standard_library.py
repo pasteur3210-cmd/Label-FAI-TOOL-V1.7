@@ -79,11 +79,12 @@ def test_golden_rows_map_to_legacy_engine_without_duplicate_standard_display():
     assert all(r.get('source')=='Golden' for r in shown)
 
 
-def test_readiness_blocks_unmapped_required_unknown_but_not_draft_save():
-    p={'dynamic_profile':True,'golden_form_items':[{'form_no':1,'item':'Golden #1: New Thing','type':'Needs Review','required':True,'engine_items':[]}],
-       'golden_completeness':{'document_item_count':1,'missing_item_numbers':[]}}
-    errs=gpm.validation_readiness_errors(p)
-    assert any('requires engineering review' in e for e in errs)
+def test_readiness_accepts_manual_path_for_unmapped_required_unknown():
+    p={'dynamic_profile':True,'golden_form_items':[{'form_no':1,'item':'Golden #1: New Thing','type':'Needs Review','required':True,'engine_items':[],'manual_review_allowed':True}],
+       'golden_completeness':{'document_item_count':1,'profile_item_count':1,'document_item_numbers':[1],'missing_item_numbers':[]}}
+    assert gpm.validation_readiness_errors(p)==[]
+    s=gpm.validation_readiness_summary(p)
+    assert s['manual']==1 and s['missing']==0
 
 def test_chassis_label_part_number_wins_over_blank_label_part_number():
     text='Blank Label Part Number：502109-024\nChassis Label Part Number：680010-371'
