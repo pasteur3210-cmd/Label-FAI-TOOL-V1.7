@@ -108,6 +108,7 @@ def _docx_final_label_media_names(path: Path) -> list[str]:
         return []
     w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     a='http://schemas.openxmlformats.org/drawingml/2006/main'
+    v='urn:schemas-microsoft-com:vml'
     r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'
     pr='http://schemas.openxmlformats.org/package/2006/relationships'
     try:
@@ -124,8 +125,19 @@ def _docx_final_label_media_names(path: Path) -> list[str]:
                     after=True
                 if not after:
                     continue
+                # Modern DOCX uses DrawingML <a:blip r:embed=...>; legacy
+                # .doc -> .docx Word conversion frequently keeps pictures as
+                # VML <v:imagedata r:id=...>. Support BOTH. Missing the VML
+                # path was the root cause of password/support screenshots being
+                # selected as the Final Label after old .doc imports.
+                rel_ids=[]
                 for blip in para.findall(f'.//{{{a}}}blip'):
                     rid=blip.attrib.get(f'{{{r}}}embed','')
+                    if rid: rel_ids.append(rid)
+                for image_data in para.findall(f'.//{{{v}}}imagedata'):
+                    rid=image_data.attrib.get(f'{{{r}}}id','') or image_data.attrib.get(f'{{{r}}}embed','')
+                    if rid: rel_ids.append(rid)
+                for rid in rel_ids:
                     target=rels.get(rid,'')
                     if target:
                         name=Path(target).name
@@ -939,7 +951,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.15',
+        'profile_version':'1.9.16',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -1009,6 +1021,8 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
         rows=form_items
     profile['dynamic_standard_items']=[]
     profile=apply_editable_items(profile,rows)
+    profile['golden_item_bindings']=_build_golden_item_bindings(profile)
+    profile['runtime_form_driven_version']='1.9.16'
     profile['golden_completeness']={
         'document_item_count':len(form_items),
         'profile_item_count':len(profile.get('golden_form_items',[]) or []),
@@ -1045,7 +1059,8 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
             profile.setdefault('golden_import',{})['candidate_layout_image']=str(root/'imported_media'/layout.name)
         profile.setdefault('golden_import',{})['candidate_layout_score']=round(float(layout_score),3)
         profile.setdefault('golden_import',{})['candidate_layout_reason']=layout_reason
-        profile.setdefault('golden_import',{})['candidate_layout_policy']='FINAL_LABEL_SCORE_V1'
+        profile.setdefault('golden_import',{})['candidate_layout_policy']='FINAL_LABEL_SCORE_V2_STRUCTURAL'
+        profile.setdefault('golden_import',{})['final_label_image']=profile['golden_import']['candidate_layout_image']
     profile['golden_import']['embedded_image_count']=len(tx_images)
     profile['golden_import']['import_generation']=source_sha[:12]
 
@@ -1075,6 +1090,85 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
         raise
     return out,profile
 
+
+
+def _build_golden_item_bindings(profile: dict) -> dict[str,int]:
+    """Build exact inspection-item -> Request-Form number bindings.
+
+    Numbered Golden forms are authoritative. Manual Review must NEVER infer an
+    item specification by fuzzy similarity once a numbered form exists.
+    """
+    bindings={}
+    for row in profile.get('golden_form_items',[]) or []:
+        if not isinstance(row,dict) or row.get('form_no') is None:
+            continue
+        try:no=int(row.get('form_no'))
+        except Exception:continue
+        keys=[row.get('item',''),row.get('presence_item','')]
+        keys.extend(row.get('engine_items',[]) or [])
+        for key in keys:
+            key=str(key or '').strip()
+            if key and key not in bindings:
+                bindings[key]=no
+    return bindings
+
+
+def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list[str]]:
+    """Migrate stale Dynamic profiles to the current form-driven boundary.
+
+    Profiles imported by V1.9.13 and earlier may still contain generated
+    Golden-Text requirements derived from password/support screenshots. Those
+    stale requirements survive an EXE upgrade because external Profile JSON is
+    persistent. Rebuild runtime requirements exclusively from numbered Golden
+    rows + explicit Standard/Manual additions so upgrading the EXE also fixes
+    already-imported Profiles without forcing the operator to re-import.
+    """
+    if not profile.get('dynamic_profile') or not (profile.get('golden_form_items') or []):
+        return profile,False,[]
+    if str(profile.get('runtime_form_driven_version',''))=='1.9.16' and profile.get('golden_item_bindings'):
+        return profile,False,[]
+    before=deepcopy(profile)
+    rows=_dynamic_item_rows(profile)
+    cleaned=apply_editable_items(profile,rows)
+    cleaned['profile_version']='1.9.16'
+    cleaned['runtime_form_driven_version']='1.9.16'
+    cleaned['golden_item_bindings']=_build_golden_item_bindings(cleaned)
+    # Migration is a controlled engine update, not an operator edit. Preserve
+    # a previously VALIDATED status only if every required item still has a
+    # handling path under the new rules; otherwise DRAFT is safer.
+    old_status=str(before.get('profile_status','DRAFT'))
+    if old_status=='VALIDATED' and not validation_readiness_errors(cleaned):
+        cleaned['profile_status']='VALIDATED'
+    notes=[]
+    stale_before={str(x.get('item','')) for x in before.get('dynamic_fixed_texts',[]) or [] if isinstance(x,dict)}
+    stale_after={str(x.get('item','')) for x in cleaned.get('dynamic_fixed_texts',[]) or [] if isinstance(x,dict)}
+    removed=sorted(x for x in stale_before-stale_after if x)
+    if removed: notes.append('removed stale generated Golden Text: '+', '.join(removed[:12]))
+    changed=(cleaned != before)
+    return cleaned,changed,notes
+
+
+def validation_readiness_summary(profile: dict) -> dict:
+    """Summarize final Profile handling paths for operator confirmation."""
+    summary={'auto':0,'manual':0,'disabled':0,'missing':0,'total':0}
+    if not profile.get('dynamic_profile'):
+        return summary
+    for row in profile.get('golden_form_items',[]) or []:
+        if not isinstance(row,dict): continue
+        summary['total']+=1
+        if not row.get('required',False):
+            summary['disabled']+=1; continue
+        typ=str(row.get('type','Needs Review'))
+        auto=bool(row.get('engine_items') or row.get('presence_item'))
+        if typ=='Golden Text':
+            auto=True  # Dynamic Golden text engine is the automatic path.
+        if auto:
+            summary['auto']+=1
+        elif bool(row.get('manual_review_allowed',True)):
+            summary['manual']+=1
+        else:
+            summary['missing']+=1
+    return summary
 
 def validate_profile_structure(profile: dict, path: Path|None=None) -> list[str]:
     errors=[]
@@ -1111,7 +1205,13 @@ def validate_profile_structure(profile: dict, path: Path|None=None) -> list[str]
 
 
 def validation_readiness_errors(profile: dict) -> list[str]:
-    """Errors that block VALIDATED status but do not block saving a DRAFT."""
+    """Block VALIDATED only when a Required item has no handling path.
+
+    AUTO is preferred, but MANUAL REVIEW is a first-class, traceable inspection
+    path. A missing automatic mapping/template must therefore not block final
+    confirmation when Manual Review is allowed. This matches the factory-use
+    workflow: nothing may be bypassed, but not everything must be automated.
+    """
     errors=[]
     if not profile.get('dynamic_profile'):
         return errors
@@ -1128,21 +1228,10 @@ def validation_readiness_errors(profile: dict) -> list[str]:
             continue
         typ=str(row.get('type','Needs Review'))
         no=row.get('form_no','?'); label=str(row.get('item',''))
-        if typ=='Needs Review':
-            errors.append(f'Golden item #{no} requires engineering review: {label}')
-        if typ in ('Golden QR','Golden Barcode'):
-            # Unknown payload/format is allowed only because a mandatory
-            # presence item + Manual Review path prevents bypass.
-            if not (row.get('engine_items') or []) and not row.get('presence_item'):
-                errors.append(f'Golden item #{no} has no machine-code presence/review path: {label}')
-        elif typ in ('Golden Artwork','Golden Variable','Golden Choice') and not (row.get('engine_items') or []):
-            errors.append(f'Golden item #{no} has no Legacy CAM/Image mapping yet: {label}')
-        if typ=='Golden Artwork' and (row.get('engine_items') or []):
-            art=profile.get('artwork_verification',{}) or {}
-            configured={str(x.get('item') or ('Artwork: '+str(x.get('name','')))) for x in art.get('symbols',[]) or [] if isinstance(x,dict) and x.get('template')}
-            for mapped in row.get('engine_items',[]) or []:
-                if str(mapped).startswith('Artwork:') and (not art.get('enabled') or str(mapped) not in configured):
-                    errors.append(f'Golden item #{no} artwork template not configured for Legacy engine: {mapped}')
+        auto_path=bool(row.get('engine_items') or row.get('presence_item')) or typ=='Golden Text'
+        manual_path=bool(row.get('manual_review_allowed',True))
+        if not auto_path and not manual_path:
+            errors.append(f'Golden item #{no} has no AUTO or MANUAL handling path: {label}')
     return errors
 
 
@@ -1160,7 +1249,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.15'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.16'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})

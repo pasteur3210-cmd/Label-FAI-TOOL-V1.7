@@ -21,7 +21,7 @@ from .core.artwork_presence import resolve_artwork_file
 from .core.multi_image_inspection import MultiImageInspectionEngine
 from .core.profile_manager import discover_profiles
 from .core.golden_profile_manager import (build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors,
-    _dynamic_item_rows, apply_editable_items, save_profile_identity_edits, STANDARD_LIBRARY, validation_readiness_errors, select_final_label_image)
+    _dynamic_item_rows, apply_editable_items, save_profile_identity_edits, STANDARD_LIBRARY, validation_readiness_errors, validation_readiness_summary, normalize_dynamic_profile_for_runtime, select_final_label_image)
 from .core.camera_manager import CameraManager
 from .core.live_engine import LiveFrameAnalyzer, LOCK_TO_FIELD
 from .core.smart_lock import SmartLockEngine, IdentityGuard
@@ -386,7 +386,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.15'
+                working['profile_version']='1.9.16'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -427,9 +427,17 @@ class App(tk.Tk):
         if not data.get('dynamic_profile'):
             messagebox.showinfo("Validate Profile","This is a bundled engineering profile. No status change is required.")
             return
-        if not messagebox.askyesno("Validate Profile",
-            "Structural checks passed.\n\nMark this Golden Profile as VALIDATED?\n"
-            "Only do this after checking the extracted items / thresholds and testing known-good label photos."):
+        summary=validation_readiness_summary(data)
+        msg=(
+            "Every Required Golden item has an inspection path.\n\n"
+            f"AUTO check: {summary['auto']}\n"
+            f"MANUAL review: {summary['manual']}\n"
+            f"Disabled / Not Required: {summary['disabled']}\n"
+            f"Missing handling path: {summary['missing']}\n\n"
+            "Validate is the final engineering confirmation step; MANUAL review is an accepted traceable path.\n"
+            "Mark this Golden Profile as VALIDATED?"
+        )
+        if not messagebox.askyesno("Validate Profile",msg):
             return
         try:
             updated=mark_validated(path,data)
@@ -572,7 +580,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.15 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.16 Form-driven Golden + deterministic item reference + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -629,6 +637,25 @@ class App(tk.Tk):
         name=self.profile_var.get()
         if not name or name not in self.profiles:return
         path,data=self.profiles[name]
+        # V1.9.16 compatibility migration: external Dynamic Profiles survive EXE
+        # upgrades. Clean stale V1.9.13-era generated Golden Text and rebuild
+        # runtime requirements from numbered Request-Form rows before engines
+        # are created. This prevents old password/support text from reappearing
+        # after upgrading the program.
+        try:
+            migrated,changed,migration_notes=normalize_dynamic_profile_for_runtime(data)
+            if changed and data.get('dynamic_profile'):
+                migrated.setdefault('profile_edit_log',[]).append({
+                    'edited_at':datetime.now().isoformat(timespec='seconds'),
+                    'action':'AUTO_RUNTIME_PROFILE_MIGRATION_V1916',
+                    'notes':migration_notes,
+                })
+                path.write_text(json.dumps(migrated,ensure_ascii=False,indent=2),encoding='utf-8')
+                data=migrated
+                self.profiles[name]=(path,data)
+                log.info('PROFILE_RUNTIME_MIGRATED file=%s notes=%s',path,migration_notes)
+        except Exception as exc:
+            log.warning('PROFILE_RUNTIME_MIGRATION_FAILED file=%s error=%r',path,exc)
         previous_identity=getattr(self,'_active_profile_identity','')
         new_identity=f"{path.resolve()}|{(data.get('golden_import') or {}).get('source_sha256','')}|{data.get('profile_version','')}"
         profile_changed=bool(previous_identity and previous_identity != new_identity)
@@ -2042,35 +2069,64 @@ class App(tk.Tk):
         return self.image_paths[0] if self.image_paths else ''
 
     def _golden_form_row_for_item(self, item: str) -> dict | None:
-        """Resolve the controlled-form row for an inspection item.
+        """Resolve inspection item -> numbered Request-Form row deterministically.
 
-        Manual Review must use the source Request-Form item as the explanation
-        and must not guess from unrelated embedded screenshots.  Older Dynamic
-        profiles may expose a `Golden Text: ...` item rather than `Golden #N`;
-        keyword matching below keeps those profiles reviewable without silently
-        showing the wrong document section.
+        V1.9.16 rule: once a numbered Golden exists, the item/reference binding
+        is an ID relationship, never a fuzzy/similarity lookup. Compatibility
+        keyword fallback is allowed only for old non-numbered Profiles.
         """
         try:
             profile=self.multi_image_engine.profile if self.multi_image_engine else {}
             rows=(profile or {}).get('golden_form_items',[]) or []
+            bindings=(profile or {}).get('golden_item_bindings',{}) or {}
+            bound=bindings.get(str(item))
+            if bound is not None:
+                for r in rows:
+                    if isinstance(r,dict) and str(r.get('form_no'))==str(bound):
+                        return r
             for r in rows:
                 if not isinstance(r,dict):
                     continue
                 if item==str(r.get('item','')) or item==str(r.get('presence_item','')) or item in [str(x) for x in (r.get('engine_items',[]) or [])]:
                     return r
-            # Compatibility path for pre-numbered/older Dynamic items. Use only
-            # high-specificity field labels; never fuzzy-match long prose.
+            # Numbered Request Form exists => allow only deterministic
+            # semantic aliases for stale pre-V1.9.16 item names. Never use
+            # similarity/fuzzy matching across numbered rows.
+            if any(isinstance(r,dict) and r.get('form_no') is not None for r in rows):
+                up=str(item or '').upper()
+                def unique(pred):
+                    hits=[r for r in rows if isinstance(r,dict) and pred(r)]
+                    return hits[0] if len(hits)==1 else None
+                if 'GPON S/N' in up or 'GPON SN' in up:
+                    return unique(lambda r: str(r.get('machine_code_field',''))=='gpon_sn' or str(r.get('raw_text','')).upper().startswith(('GPON S/N','GPON SN')))
+                if re.search(r'(^|[^A-Z])S/N([^A-Z]|$)',up) and 'GPON' not in up:
+                    return unique(lambda r: str(r.get('machine_code_field',''))=='sn' or bool(re.match(r'^S\s*/\s*N',str(r.get('raw_text','')),re.I)))
+                if 'MAC' in up:
+                    return unique(lambda r: str(r.get('machine_code_field',''))=='mac' or bool(re.match(r'^MAC\b',str(r.get('raw_text','')),re.I)))
+                if 'MADE IN' in up:
+                    return unique(lambda r: 'made in' in str(r.get('raw_text','')).lower())
+                if 'COMTREND' in up and 'LOGO' in up:
+                    return unique(lambda r: 'comtrend logo' in str(r.get('raw_text','')).lower())
+                if 'INPUT' in up:
+                    return unique(lambda r: str(r.get('raw_text','')).lower().startswith('input'))
+                if 'SSID' in up:
+                    return unique(lambda r: str(r.get('raw_text','')).lower().startswith('ssid'))
+                if 'WIFI KEY' in up:
+                    return unique(lambda r: str(r.get('raw_text','')).lower().startswith('wifi key'))
+                if 'PASSWORD' in up:
+                    return unique(lambda r: str(r.get('raw_text','')).lower().startswith('password'))
+                return None
+            # Compatibility only for old image-only/non-numbered Dynamic profiles.
             up=str(item or '').upper()
             aliases=(
                 ('GPON S/N',('GPON S/N','GPON SN')),('S/N',('S/N','SERIAL')),
                 ('MAC',('MAC',)),('MADE IN',('MADE IN',)),('INPUT',('INPUT',)),
                 ('USB',('USB',)),('SSID',('SSID',)),('WIFI KEY',('WIFI KEY',)),
                 ('PASSWORD',('PASSWORD',)),('MODEL',('MODEL',)),('P/N',('P/N','PART NO')),
-                ('QR',('QR CODE',' QR ')),('COMTREND',('COMTREND LOGO','COMTREND LOGO')),
+                ('QR',('QR CODE',' QR ')),('COMTREND',('COMTREND LOGO',)),
             )
             for needle,terms in aliases:
-                if needle not in up:
-                    continue
+                if needle not in up: continue
                 for r in rows:
                     raw=str(r.get('raw_text','')).upper() if isinstance(r,dict) else ''
                     label=str(r.get('item','')).upper() if isinstance(r,dict) else ''
@@ -2101,7 +2157,7 @@ class App(tk.Tk):
     def _golden_review_image_path(self) -> str:
         """Return the final printed Label Example, never a support screenshot.
 
-        V1.9.15 re-ranks the imported images at review time as a compatibility
+        V1.9.16 re-ranks the imported images at review time as a compatibility
         guard for Profiles imported by older versions whose candidate image was
         chosen by file size.  The scorer rewards label anchors/machine codes and
         penalises prose-heavy password/procedure screenshots.
@@ -2109,6 +2165,12 @@ class App(tk.Tk):
         try:
             profile=self.multi_image_engine.profile if self.multi_image_engine else {}
             gi=(profile or {}).get('golden_import',{}) or {}
+            # New imports persist the exact structurally identified Final Label.
+            # Trust that path first; do not re-rank support screenshots at every
+            # Manual Review. Old profiles fall back to the compatibility scorer.
+            exact=str(gi.get('final_label_image','') or '')
+            if exact and os.path.exists(exact):
+                return exact
             asset=str(gi.get('asset_dir',''))
             files=[]
             if asset and os.path.isdir(asset):
@@ -2251,7 +2313,7 @@ class App(tk.Tk):
     def _golden_review_region(self, item: str):
         """Return (final_label_path, focus_box, description) for selected item.
 
-        V1.9.15 safety boundary:
+        V1.9.16 safety boundary:
         * visual reference is always the FINAL Label Example;
         * item explanation comes from the controlled Request-Form row;
         * Focus Item may search only OCR/code geometry belonging to that final
@@ -2362,7 +2424,7 @@ class App(tk.Tk):
     def _show_manual_golden_review(self, items: list[str], note: str):
         """Golden-assisted review for one non-PASS item.
 
-        V1.9.15 UI safety rules:
+        V1.9.16 UI safety rules:
         - Action buttons are placed above the image comparison area, so the
           Windows taskbar can never cover the only decision controls.
         - The popup size is calculated from the current screen instead of a
@@ -2414,7 +2476,7 @@ class App(tk.Tk):
         if mode=='REVIEW_ONLY':
             ttk.Label(top,text='REVIEW ONLY：此項為身分/條碼/一致性資料，可人工確認或要求重讀，但不可用單次目視直接覆寫成 PASS。',foreground='#A00000').pack(anchor='w',pady=(3,0))
 
-        # V1.9.15: keep the decision bar permanently visible ABOVE the images.
+        # V1.9.16: keep the decision bar permanently visible ABOVE the images.
         actions=ttk.Frame(win,padding=(8,4)); actions.pack(fill='x')
         ttk.Label(actions,text=f'Note: {note}',foreground='#444').pack(side='left',padx=(0,8))
 
@@ -2475,12 +2537,12 @@ class App(tk.Tk):
                 ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
         put_image(left,actual_path,'No evidence image is available for this item.',caption=os.path.basename(actual_path) if actual_path else '')
 
-        # V1.9.15: the operator always starts from the COMPLETE Golden label.
+        # V1.9.16: the operator always starts from the COMPLETE Golden label.
         # A typed/verified focus crop is an optional aid, never the only
         # reference. This prevents an incorrect ROI mapping from misleading a
         # factory manual decision.
         golden_controls=ttk.Frame(right); golden_controls.pack(fill='x',pady=(0,4))
-        # V1.9.15: show the controlled Request-Form explanation separately from
+        # V1.9.16: show the controlled Request-Form explanation separately from
         # the Final Label visual. This prevents support screenshots (password
         # proposals, process notes, etc.) from being mistaken for the Golden
         # reference of MAC/Made-in/other fields.
@@ -2663,7 +2725,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.15 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.16 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.
