@@ -198,11 +198,15 @@ def parse_decoded_fields(decoded_texts: Iterable[str], profile=None, preferred_f
             if pm: f.setdefault("qr_wifi_key", pm.group(1))
         elif dynamic and _parse_generic_qr_payload(text, f, profile=profile):
             pass
-        elif sn_re.fullmatch(text):
-            sn_candidates.append(text.upper())
+        elif dynamic and str((profile or {}).get('rules',{}).get('gpon_prefix','') or '') and text.upper().startswith(str((profile or {}).get('rules',{}).get('gpon_prefix','')).upper()) and gp_re.fullmatch(text):
+            # Controlled GPON prefix wins over a broad S/N pattern. This avoids
+            # a GPON barcode becoming a second S/N and triggering false identity mismatch.
+            gp_candidates.append(text.upper())
         elif mac_re.fullmatch(text):
             # A 12-HEX MAC also matches broad generic GPON regexes. MAC wins.
             mac_candidates.append(text.upper())
+        elif sn_re.fullmatch(text):
+            sn_candidates.append(text.upper())
         elif gp_re.fullmatch(text):
             gp_candidates.append(text.upper())
         else:

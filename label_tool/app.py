@@ -21,7 +21,7 @@ from .core.artwork_presence import resolve_artwork_file
 from .core.multi_image_inspection import MultiImageInspectionEngine
 from .core.profile_manager import discover_profiles
 from .core.golden_profile_manager import (build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors,
-    _dynamic_item_rows, apply_editable_items, save_profile_identity_edits, STANDARD_LIBRARY, validation_readiness_errors)
+    _dynamic_item_rows, apply_editable_items, save_profile_identity_edits, STANDARD_LIBRARY, validation_readiness_errors, select_final_label_image)
 from .core.camera_manager import CameraManager
 from .core.live_engine import LiveFrameAnalyzer, LOCK_TO_FIELD
 from .core.smart_lock import SmartLockEngine, IdentityGuard
@@ -386,7 +386,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.13'
+                working['profile_version']='1.9.15'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -572,7 +572,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.13 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.15 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -2041,20 +2041,86 @@ class App(tk.Tk):
                 return p
         return self.image_paths[0] if self.image_paths else ''
 
+    def _golden_form_row_for_item(self, item: str) -> dict | None:
+        """Resolve the controlled-form row for an inspection item.
+
+        Manual Review must use the source Request-Form item as the explanation
+        and must not guess from unrelated embedded screenshots.  Older Dynamic
+        profiles may expose a `Golden Text: ...` item rather than `Golden #N`;
+        keyword matching below keeps those profiles reviewable without silently
+        showing the wrong document section.
+        """
+        try:
+            profile=self.multi_image_engine.profile if self.multi_image_engine else {}
+            rows=(profile or {}).get('golden_form_items',[]) or []
+            for r in rows:
+                if not isinstance(r,dict):
+                    continue
+                if item==str(r.get('item','')) or item==str(r.get('presence_item','')) or item in [str(x) for x in (r.get('engine_items',[]) or [])]:
+                    return r
+            # Compatibility path for pre-numbered/older Dynamic items. Use only
+            # high-specificity field labels; never fuzzy-match long prose.
+            up=str(item or '').upper()
+            aliases=(
+                ('GPON S/N',('GPON S/N','GPON SN')),('S/N',('S/N','SERIAL')),
+                ('MAC',('MAC',)),('MADE IN',('MADE IN',)),('INPUT',('INPUT',)),
+                ('USB',('USB',)),('SSID',('SSID',)),('WIFI KEY',('WIFI KEY',)),
+                ('PASSWORD',('PASSWORD',)),('MODEL',('MODEL',)),('P/N',('P/N','PART NO')),
+                ('QR',('QR CODE',' QR ')),('COMTREND',('COMTREND LOGO','COMTREND LOGO')),
+            )
+            for needle,terms in aliases:
+                if needle not in up:
+                    continue
+                for r in rows:
+                    raw=str(r.get('raw_text','')).upper() if isinstance(r,dict) else ''
+                    label=str(r.get('item','')).upper() if isinstance(r,dict) else ''
+                    if any(term in raw or term in label for term in terms):
+                        return r
+        except Exception:
+            pass
+        return None
+
+    def _golden_item_specification(self, item: str) -> str:
+        row=self._golden_form_row_for_item(item)
+        if not row:
+            return 'No item-specific Golden specification was mapped. Use the Final Label image as the visual reference and update the Profile if needed.'
+        raw=' '.join(str(row.get('raw_text','') or '').split())
+        bits=[]
+        if row.get('form_no') is not None:
+            bits.append(f"Golden item #{row.get('form_no')}")
+        if raw:
+            bits.append(raw)
+        sel=str(row.get('selected','') or '').strip()
+        if sel:
+            bits.append(f'Selected: {sel}')
+        exp=str(row.get('expected','') or '').strip()
+        if exp and exp.lower() not in raw.lower():
+            bits.append(f'Expected: {exp}')
+        return ' | '.join(bits) if bits else str(item)
+
     def _golden_review_image_path(self) -> str:
+        """Return the final printed Label Example, never a support screenshot.
+
+        V1.9.15 re-ranks the imported images at review time as a compatibility
+        guard for Profiles imported by older versions whose candidate image was
+        chosen by file size.  The scorer rewards label anchors/machine codes and
+        penalises prose-heavy password/procedure screenshots.
+        """
         try:
             profile=self.multi_image_engine.profile if self.multi_image_engine else {}
             gi=(profile or {}).get('golden_import',{}) or {}
+            asset=str(gi.get('asset_dir',''))
+            files=[]
+            if asset and os.path.isdir(asset):
+                for ext in ('*.png','*.jpg','*.jpeg','*.bmp','*.webp'):
+                    files.extend(pathlib.Path(asset).rglob(ext))
+            if files:
+                best,score,reason=select_final_label_image(files,gi.get('image_ocr_results',[]) or [],gi.get('machine_codes',[]) or [],gi.get('final_label_document_candidates',[]) or [])
+                if best and best.exists():
+                    return str(best)
             candidate=str(gi.get('candidate_layout_image',''))
             if candidate and os.path.exists(candidate):
                 return candidate
-            asset=str(gi.get('asset_dir',''))
-            if asset and os.path.isdir(asset):
-                files=[]
-                for ext in ('*.png','*.jpg','*.jpeg','*.bmp','*.webp'):
-                    files.extend(pathlib.Path(asset).rglob(ext))
-                if files:
-                    return str(max(files,key=lambda x:x.stat().st_size))
         except Exception:
             pass
         return ''
@@ -2157,25 +2223,45 @@ class App(tk.Tk):
         except Exception as exc:
             return None,f'Artwork review: locator unavailable ({exc}); showing full Golden'
 
-    def _golden_review_region(self, item: str):
-        """Return (image_path, focus_box, description) for the selected item.
 
-        V1.9.13 keeps strict type-safe mapping while adding a safe navigation
-        marker for manual review. The returned box may be used both to draw a
-        highlight on the COMPLETE Golden and, when reliable, for Focus Item.
-        Automatic inspection decisions are never changed by this helper.
+    def _golden_review_focus_terms(self, item: str, row: dict | None) -> list[str]:
+        """Return short, field-specific anchors for locating an item on FINAL Label.
+
+        Never use the whole Request-Form paragraph as an OCR search query. Long
+        prose caused MAC/Made-in reviews to match password-proposal screenshots.
+        """
+        text=' '.join(str(x) for x in (item,(row or {}).get('item',''),(row or {}).get('raw_text','')) if x).upper()
+        ordered=[
+            ('GPON S/N',['GPON S/N','GPON SN']),('S/N',['S/N']),('MAC',['MAC']),
+            ('MADE IN',['MADE IN']),('INPUT',['INPUT']),('USB',['USB']),
+            ('SSID',['SSID']),('WIFI KEY',['WIFI KEY']),('PASSWORD',['PASSWORD']),
+            ('USERNAME',['USERNAME']),('IP ADDRESS',['IP ADDRESS']),('MODEL',['MODEL']),
+            ('P/N',['P/N']),('PART NO',['P/N']),('FCC ID',['FCC ID']),('IC ID',['IC ID']),
+            ('CLASS 1 LASER',['CLASS 1 LASER']),('COMTREND',['COMTREND']),
+            ('HOME GATEWAY',['HOME GATEWAY']),('GPON VOIP GATEWAY',['GPON VOIP GATEWAY']),
+        ]
+        for needle,terms in ordered:
+            if needle in text:
+                return terms
+        exp=str((row or {}).get('expected','') or '').strip()
+        if exp and len(exp)<=48:
+            return [exp]
+        return []
+
+    def _golden_review_region(self, item: str):
+        """Return (final_label_path, focus_box, description) for selected item.
+
+        V1.9.15 safety boundary:
+        * visual reference is always the FINAL Label Example;
+        * item explanation comes from the controlled Request-Form row;
+        * Focus Item may search only OCR/code geometry belonging to that final
+          label image, never a password proposal or other support screenshot.
         """
         path=self._golden_review_image_path()
         try:
             profile=self.multi_image_engine.profile if self.multi_image_engine else {}
             gi=(profile or {}).get('golden_import',{}) or {}
-            rows=(profile or {}).get('golden_form_items',[]) or []
-            row=None
-            for r in rows:
-                if not isinstance(r,dict):
-                    continue
-                if item==str(r.get('item','')) or item==str(r.get('presence_item','')) or item in [str(x) for x in (r.get('engine_items',[]) or [])]:
-                    row=r; break
+            row=self._golden_form_row_for_item(item)
             ev=self.multi_image_result.evidence.get(item) if self.multi_image_result else None
             actual=str(ev.actual if ev else '')
             typ=str((row or {}).get('type',''))
@@ -2193,67 +2279,90 @@ class App(tk.Tk):
                             else:
                                 box=tuple(int(x) for x in vals)
                             if box[2]>box[0] and box[3]>box[1]:
-                                return path,box,'Verified Artwork ROI from Golden Profile'
+                                return path,box,'Verified Artwork ROI on Final Label'
                     except Exception:
                         pass
                 marker,note=self._golden_review_artwork_marker(item,path,gi)
                 return path,marker,note
 
-            if typ in ('Golden QR','Golden Barcode') or 'QR' in item.upper() or 'BARCODE' in item.upper():
+            explicit_text=str(item).startswith('Golden Text:') or str(item).startswith('Golden #') and typ in ('Golden Text','Golden Choice')
+            if (not explicit_text) and (typ in ('Golden QR','Golden Barcode') or 'QR' in item.upper() or 'BARCODE' in item.upper()):
                 want='QR' if (typ=='Golden QR' or 'QR' in item.upper()) else 'BARCODE'
-                codes=[c for c in (gi.get('machine_codes',[]) or []) if str(c.get('kind','')).upper()==want]
+                # Restrict code geometry to the selected FINAL Label image.
+                codes=[]
+                for c in (gi.get('machine_codes',[]) or []):
+                    if str(c.get('kind','')).upper()!=want:
+                        continue
+                    cpath=str(c.get('file','') or '')
+                    try:
+                        if path and cpath and pathlib.Path(cpath).resolve()!=pathlib.Path(path).resolve():
+                            continue
+                    except Exception:
+                        if path and cpath and os.path.basename(cpath)!=os.path.basename(path):
+                            continue
+                    codes.append(c)
                 if actual:
                     exact=[c for c in codes if str(c.get('text','')) and (str(c.get('text','')) in actual or actual in str(c.get('text','')))]
                     if exact: codes=exact
                 if codes:
-                    c=codes[0]; cpath=str(c.get('file','') or path)
-                    pts=c.get('points',[]) or []
-                    if len(pts)>=2:
+                    c=codes[0]; pts=c.get('points',[]) or []
+                    if len(pts)>=2 and path:
                         xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
                         try:
-                            with Image.open(cpath) as im:
+                            with Image.open(path) as im:
                                 pad=max(20,int(min(im.size)*0.03))
                                 box=(max(0,int(min(xs))-pad),max(0,int(min(ys))-pad),min(im.width,int(max(xs))+pad),min(im.height,int(max(ys))+pad))
-                            return cpath,box,f'{want} ROI from imported Golden'
+                            return path,box,f'{want} ROI on Final Label'
                         except Exception:
                             pass
 
-            target=' '.join(str(x) for x in ((row or {}).get('expected',''),(row or {}).get('raw_text',''),item) if x).strip()
-            if target:
-                import difflib
+            # Text/field focus: use short field anchors and only OCR lines from
+            # the FINAL Label image. Never compare the whole explanatory prose.
+            terms=self._golden_review_focus_terms(item,row)
+            if terms and path:
                 def norm(v):
-                    return ' '.join(re.sub(r'[^a-z0-9]+',' ',str(v or '').lower()).split())
-                nt=norm(target); target_tokens=set(nt.split())
+                    return ' '.join(re.sub(r'[^a-z0-9/]+',' ',str(v or '').lower()).split())
                 best=None
                 for ocr in gi.get('image_ocr_results',[]) or []:
                     opath=str(ocr.get('file','') or '')
+                    try:
+                        same=bool(opath) and pathlib.Path(opath).resolve()==pathlib.Path(path).resolve()
+                    except Exception:
+                        same=bool(opath) and os.path.basename(opath)==os.path.basename(path)
+                    if not same:
+                        continue
                     for line in ocr.get('lines',[]) or []:
                         txt=str(line.get('text','') or ''); nl=norm(txt)
                         if not nl: continue
-                        seq=difflib.SequenceMatcher(None,nt,nl).ratio() if nt else 0.0
-                        toks=set(nl.split()); overlap=(len(target_tokens & toks)/max(1,len(target_tokens))) if target_tokens else 0.0
-                        score=max(seq,overlap)
+                        score=0.0; matched=''
+                        for term in terms:
+                            nt=norm(term)
+                            if nt and (nl.startswith(nt) or nt in nl):
+                                # Exact field-name containment is intentionally
+                                # much stronger than any fuzzy fallback.
+                                sc=1.0 if nl.startswith(nt) else 0.9
+                                if sc>score: score=sc; matched=term
                         if best is None or score>best[0]:
-                            best=(score,opath,line)
-                if best and best[0]>=0.25:
-                    _,opath,line=best; pts=line.get('box',[]) or []
-                    if len(pts)>=2 and opath:
+                            best=(score,opath,line,matched)
+                if best and best[0]>=0.85:
+                    _,_opath,line,matched=best; pts=line.get('box',[]) or []
+                    if len(pts)>=2:
                         xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
                         try:
-                            with Image.open(opath) as im:
-                                padx=max(40,int(im.width*0.08)); pady=max(30,int(im.height*0.06))
+                            with Image.open(path) as im:
+                                padx=max(35,int(im.width*0.06)); pady=max(24,int(im.height*0.045))
                                 box=(max(0,int(min(xs))-padx),max(0,int(min(ys))-pady),min(im.width,int(max(xs))+padx),min(im.height,int(max(ys))+pady))
-                            return opath,box,f'Golden OCR focus: {line.get("text","")}'
+                            return path,box,f'Final Label focus: {matched} | OCR: {line.get("text","")}'
                         except Exception:
                             pass
         except Exception:
             pass
-        return path,None,'Golden item location not verified; showing full Golden image'
+        return path,None,'Final Label item location not verified; showing full Final Label'
 
     def _show_manual_golden_review(self, items: list[str], note: str):
         """Golden-assisted review for one non-PASS item.
 
-        V1.9.13 UI safety rules:
+        V1.9.15 UI safety rules:
         - Action buttons are placed above the image comparison area, so the
           Windows taskbar can never cover the only decision controls.
         - The popup size is calculated from the current screen instead of a
@@ -2305,7 +2414,7 @@ class App(tk.Tk):
         if mode=='REVIEW_ONLY':
             ttk.Label(top,text='REVIEW ONLY：此項為身分/條碼/一致性資料，可人工確認或要求重讀，但不可用單次目視直接覆寫成 PASS。',foreground='#A00000').pack(anchor='w',pady=(3,0))
 
-        # V1.9.13: keep the decision bar permanently visible ABOVE the images.
+        # V1.9.15: keep the decision bar permanently visible ABOVE the images.
         actions=ttk.Frame(win,padding=(8,4)); actions.pack(fill='x')
         ttk.Label(actions,text=f'Note: {note}',foreground='#444').pack(side='left',padx=(0,8))
 
@@ -2366,11 +2475,19 @@ class App(tk.Tk):
                 ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
         put_image(left,actual_path,'No evidence image is available for this item.',caption=os.path.basename(actual_path) if actual_path else '')
 
-        # V1.9.13: the operator always starts from the COMPLETE Golden label.
+        # V1.9.15: the operator always starts from the COMPLETE Golden label.
         # A typed/verified focus crop is an optional aid, never the only
         # reference. This prevents an incorrect ROI mapping from misleading a
         # factory manual decision.
         golden_controls=ttk.Frame(right); golden_controls.pack(fill='x',pady=(0,4))
+        # V1.9.15: show the controlled Request-Form explanation separately from
+        # the Final Label visual. This prevents support screenshots (password
+        # proposals, process notes, etc.) from being mistaken for the Golden
+        # reference of MAC/Made-in/other fields.
+        spec_box=ttk.LabelFrame(right,text='Golden Item Specification / Golden 項目說明',padding=(6,4))
+        spec_box.pack(fill='x',pady=(0,5))
+        spec_text=self._golden_item_specification(item)
+        ttk.Label(spec_box,text=spec_text,wraplength=max_img_w-30,justify='left',foreground='#333').pack(fill='x',anchor='w')
         golden_view=ttk.Frame(right); golden_view.pack(fill='both',expand=True)
 
         view_state=tk.StringVar(value='Full Golden / 完整Golden')
@@ -2410,7 +2527,7 @@ class App(tk.Tk):
             except Exception as exc:
                 ttk.Label(golden_view,text=f'Cannot open Golden image: {exc}').pack(fill='both',expand=True)
 
-        full_btn=ttk.Button(golden_controls,text='Full Golden / 完整Golden',command=lambda:render_golden(None,'Full Golden reference',golden_crop))
+        full_btn=ttk.Button(golden_controls,text='Full Golden / 完整Golden',command=lambda:render_golden(None,'Final Label / Full Golden reference',golden_crop))
         full_btn.pack(side='left',padx=(0,4))
         focus_btn=ttk.Button(golden_controls,text='Focus Item / 項目放大',command=lambda:render_golden(golden_crop,golden_focus_note,None))
         focus_btn.pack(side='left')
@@ -2418,7 +2535,7 @@ class App(tk.Tk):
         if not golden_focus_allowed:
             focus_btn.config(state='disabled')
         ttk.Label(golden_controls,text=golden_focus_note,foreground='#666',wraplength=max_img_w-190).pack(side='left',padx=(8,0))
-        render_golden(None,'Full Golden reference',golden_crop)
+        render_golden(None,'Final Label / Full Golden reference',golden_crop)
         win._review_photos=photos
 
     def manual_review_selected(self):
@@ -2546,7 +2663,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.13 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.15 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

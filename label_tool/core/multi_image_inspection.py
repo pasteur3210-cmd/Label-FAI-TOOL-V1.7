@@ -658,21 +658,41 @@ class MultiImageInspectionEngine:
                 presence=str(cfg.get("presence_item","") or "")
                 if not presence:
                     continue
-                if typ=="Golden QR":
-                    ok=has_qr
+                rule_known=bool(cfg.get("machine_code_rule_known",False))
+                field=str(cfg.get("machine_code_field","") or "")
+                if typ=="Golden QR" or field=="qr":
                     actual=next((t for f,t in zip(formats,texts) if "QR" in f),"")
-                    expected_text="QR code present / decodable; payload rule may require manual review"
+                    ok=bool(actual or has_qr)
+                    expected_text="QR code required by Golden"
+                    # If the controlled form does not define payload semantics,
+                    # successful decode is evidence of presence but NOT enough to
+                    # silently PASS the requirement. Keep it in manual review.
+                    status="PASS" if (ok and rule_known) else "WARN"
+                    msg=("Golden QR decoded; payload rule validated by profile" if status=="PASS" else
+                         "Golden QR requires operator review" if ok else
+                         "Required Golden QR was not decoded; operator review or clearer image required")
                 elif typ=="Golden Barcode":
-                    ok=has_barcode
-                    actual=next((t for f,t in zip(formats,texts) if f and "QR" not in f),"")
-                    expected_text="Barcode present / decodable; content rule may require manual review"
+                    field_map={"sn":"sn_barcode","mac":"mac_barcode","gpon_sn":"gpon_sn_barcode"}
+                    fkey=field_map.get(field,"")
+                    actual=str(direct_fields.get(fkey,"") or "") if fkey else ""
+                    if not actual and field not in ("sn","mac","gpon_sn"):
+                        actual=next((t for f,t in zip(formats,texts) if f and "QR" not in f),"")
+                    ok=bool(actual)
+                    expected_text=(f"{field.upper() if field else 'Barcode'} barcode required by Golden")
+                    # Known field barcodes may PASS only when the parser mapped
+                    # the decoded value to that exact field. Generic/undefined
+                    # barcodes remain reviewable even when a code was detected.
+                    status="PASS" if (ok and rule_known and bool(fkey)) else "WARN"
+                    msg=("Golden field barcode decoded and mapped" if status=="PASS" else
+                         "Golden barcode requires operator review" if ok or has_barcode else
+                         "Required Golden barcode was not decoded; operator review or clearer image required")
                 else:
                     continue
                 direct_rows.append(FieldResult(
                     name=presence, actual=actual or ("Present" if ok else ""), expected=expected_text,
-                    status="PASS" if ok else "WARN",
-                    message="Golden machine-code presence check" if ok else "Required Golden machine code was not decoded; operator review or clearer image required",
-                    error_code="" if ok else "GOLDEN-CODE-REVIEW"
+                    status=status,
+                    message=msg,
+                    error_code="" if status=="PASS" else "GOLDEN-CODE-REVIEW"
                 ))
             # Prevent seed/Legacy rows emitted by generic validate() from even
             # entering Dynamic evidence/debug logs.  Only the imported Golden

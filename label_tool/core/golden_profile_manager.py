@@ -97,15 +97,69 @@ def _doc_to_docx(path: Path) -> Path:
     return out
 
 
+def _docx_final_label_media_names(path: Path) -> list[str]:
+    """Return media basenames referenced at/after the 'Label Example' marker.
+
+    This is a structural signal from the controlled Word document and is more
+    reliable than OCR similarity when the document also embeds password rules,
+    process screenshots or other support images.
+    """
+    if path.suffix.lower()!='.docx' or not path.exists():
+        return []
+    w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    a='http://schemas.openxmlformats.org/drawingml/2006/main'
+    r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    pr='http://schemas.openxmlformats.org/package/2006/relationships'
+    try:
+        with zipfile.ZipFile(path,'r') as z:
+            if 'word/document.xml' not in z.namelist() or 'word/_rels/document.xml.rels' not in z.namelist():
+                return []
+            rel_root=ET.fromstring(z.read('word/_rels/document.xml.rels'))
+            rels={x.attrib.get('Id',''):x.attrib.get('Target','') for x in rel_root.findall(f'{{{pr}}}Relationship')}
+            root=ET.fromstring(z.read('word/document.xml'))
+            after=False; out=[]
+            for para in root.findall(f'.//{{{w}}}p'):
+                txt=''.join((x.text or '') for x in para.findall(f'.//{{{w}}}t')).strip()
+                if 'label example' in txt.lower():
+                    after=True
+                if not after:
+                    continue
+                for blip in para.findall(f'.//{{{a}}}blip'):
+                    rid=blip.attrib.get(f'{{{r}}}embed','')
+                    target=rels.get(rid,'')
+                    if target:
+                        name=Path(target).name
+                        if name and name not in out: out.append(name)
+            return out
+    except Exception:
+        return []
+
+
 def _extract_docx(path: Path, dest: Path) -> tuple[str, list[Path]]:
     text_parts=[]; images=[]
     ns={'w':'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
     with zipfile.ZipFile(path,'r') as z:
         if 'word/document.xml' in z.namelist():
             root=ET.fromstring(z.read('word/document.xml'))
-            for p in root.findall('.//w:p',ns):
-                parts=[(x.text or '') for x in p.findall('.//w:t',ns)]
+            # Legacy .doc -> .docx conversion often stores the visible Request-
+            # Form numbers as Word list metadata (w:numPr), not literal text.
+            # Reconstruct those numbers so the form-driven parser sees 1..N.
+            counters={}
+            for para in root.findall('.//w:p',ns):
+                parts=[(x.text or '') for x in para.findall('.//w:t',ns)]
                 line=''.join(parts).strip()
+                numpr=para.find('./w:pPr/w:numPr',ns)
+                if numpr is not None:
+                    num_el=numpr.find('w:numId',ns); lvl_el=numpr.find('w:ilvl',ns)
+                    num_id=(num_el.attrib.get('{%s}val'%ns['w']) if num_el is not None else '')
+                    ilvl=(lvl_el.attrib.get('{%s}val'%ns['w']) if lvl_el is not None else '0')
+                    if num_id:
+                        key=(num_id,ilvl)
+                        counters[key]=counters.get(key,0)+1
+                        # Do not duplicate explicit numbering already present in
+                        # DOCX text. Keep blank numbered rows (e.g. item #17).
+                        if not re.match(r'^\s*\d{1,3}[.)]\s*',line):
+                            line=f'{counters[key]}. {line}'.rstrip()
                 if line: text_parts.append(line)
         media=[n for n in z.namelist() if n.startswith('word/media/') and not n.endswith('/')]
         media_dir=dest/'imported_media'; media_dir.mkdir(parents=True,exist_ok=True)
@@ -262,6 +316,77 @@ def _largest_image(images: list[Path]) -> Path|None:
     return max(candidates,key=lambda p:p.stat().st_size)
 
 
+def _layout_candidate_score(text: str, code_count: int=0) -> tuple[float,list[str]]:
+    """Score whether OCR text looks like a final printed label, not a support screenshot.
+
+    Controlled Golden documents often embed password proposals, process notes and
+    other screenshots in addition to the final Label Example.  Manual Review must
+    use the final label as its visual reference.  The score therefore rewards
+    compact label anchors and machine codes, while penalising prose-heavy images.
+    """
+    t=' '.join(str(text or '').split())
+    low=t.lower()
+    anchors={
+        'model':2.0, 'p/n':2.0, 'part no':1.5, 'input':1.2, 'usb':1.0,
+        's/n':2.2, 'serial':1.4, 'mac':2.4, 'gpon':1.6, 'ssid':1.7,
+        'wifi key':1.7, 'password':0.8, 'made in':1.6, 'username':0.7,
+        'fcc id':1.4, 'ic id':1.4, 'class 1 laser':1.2, 'comtrend':1.0,
+    }
+    hit=[]; score=0.0
+    for key,weight in anchors.items():
+        if key in low:
+            score += weight; hit.append(key)
+    score += min(9.0, max(0,int(code_count))*3.0)
+    # Support documents tend to be paragraphs/bullets rather than a compact label.
+    support_terms=('entropy','password proposal','software upgrade','reset button','production process',
+                   'characters are from','requirement','procedure','office','randomly generated')
+    penalties=[x for x in support_terms if x in low]
+    score -= 2.2*len(penalties)
+    words=t.split()
+    if len(words)>120: score -= 3.0
+    elif len(words)>80: score -= 1.5
+    return score,hit
+
+
+def select_final_label_image(images: list[Path], image_ocr_rows: list[dict], machine_codes: list[dict], preferred_names: list[str]|None=None) -> tuple[Path|None,float,str]:
+    """Choose the embedded image that most likely is the final Label Example.
+
+    This replaces the old `largest image wins` rule which could select a password
+    proposal/support screenshot.  Matching is by basename so it works before and
+    after the transactional Golden asset paths are committed.
+    """
+    raster=[p for p in images if p.exists() and p.suffix.lower() in ('.png','.jpg','.jpeg','.bmp','.webp')]
+    candidates=raster or [p for p in images if p.exists()]
+    if not candidates: return None,0.0,'no embedded image'
+    ocr_by_name={Path(str(r.get('file',''))).name:r for r in (image_ocr_rows or [])}
+    code_count={}
+    for c in machine_codes or []:
+        name=Path(str(c.get('file',''))).name
+        code_count[name]=code_count.get(name,0)+1
+    preferred={str(x) for x in (preferred_names or []) if str(x)}
+    ranked=[]
+    for img in candidates:
+        row=ocr_by_name.get(img.name,{})
+        score,hits=_layout_candidate_score(str(row.get('text','')),code_count.get(img.name,0))
+        # Strongest signal: the image is structurally located after the
+        # controlled document's 'Label Example' marker.
+        original_name=img.name.split('_',1)[1] if re.match(r'^\d+_',img.name) else img.name
+        if img.name in preferred or original_name in preferred:
+            score += 100.0
+            hits=list(hits)+['document:Label Example']
+        # Tiny bonus for image size only as a tie breaker, never as the main rule.
+        try: score += min(0.5,img.stat().st_size/10_000_000.0)
+        except Exception: pass
+        ranked.append((score,img,hits,code_count.get(img.name,0)))
+    ranked.sort(key=lambda x:(x[0],x[1].stat().st_size if x[1].exists() else 0),reverse=True)
+    score,img,hits,codes=ranked[0]
+    # If OCR runtime was unavailable, preserve old safe raster fallback.
+    if score <= 0.2 and not any(ocr_by_name.get(x.name,{}).get('text') for x in candidates):
+        fallback=_largest_image(candidates)
+        return fallback,0.0,'OCR unavailable; raster-size fallback'
+    return img,float(score),f'label anchors={hits}; machine_codes={codes}'
+
+
 
 
 
@@ -290,49 +415,72 @@ STANDARD_LIBRARY = [
 
 
 def _split_numbered_form_items(text: str) -> list[tuple[int,str]]:
-    """Extract every numbered Request-Form item, preserving unknown items.
+    """Extract the top-level numbered Label Request items in sequence.
 
-    Golden request forms are controlled documents. Completeness is more important
-    than semantic confidence: if an item is present in the form, it must appear in
-    the Profile review even when the parser cannot fully classify it.
+    Controlled request forms may contain nested numbered rule lists inside a
+    parent item (for example password rules that restart at 1).  Those nested
+    numbers are *not* new label inspection items.  The top-level form itself is
+    monotonic (1, 2, 3, ...), so only the next expected number starts a new
+    inspection item.  Empty items are retained because the visual part of the
+    Word form/final-label example may carry the actual requirement.
     """
-    lines=[' '.join(str(x).split()) for x in str(text or '').splitlines() if str(x).strip()]
-    items=[]; current_no=None; buf=[]
-    # Stop before administrative sections that are not label inspection items.
+    raw_lines=[str(x).replace('\u00a0',' ').strip() for x in str(text or '').splitlines()]
     stop_markers=('Finished Information:', 'Manufacture Attention:', 'Label Example:')
-    for line in lines:
+    items=[]
+    started=False
+    expected_no=1
+    current_no=None
+    buf=[]
+
+    def flush():
+        nonlocal current_no,buf
+        if current_no is not None:
+            items.append((current_no,' '.join(' '.join(x.split()) for x in buf if x.strip()).strip()))
+        current_no=None; buf=[]
+
+    for raw in raw_lines:
+        line=' '.join(raw.split())
         if any(line.startswith(m) for m in stop_markers):
-            if current_no is not None and buf:
-                items.append((current_no,' '.join(buf).strip()))
-            break
-        m=re.match(r'^\s*(\d{1,2})[.)]\s*(.+)$',line)
+            flush(); break
+        m=re.match(r'^\s*(\d{1,2})[.)]\s*(.*)$',line)
+        if not started:
+            if m and int(m.group(1))==1:
+                started=True; current_no=1; expected_no=2; buf=[m.group(2).strip()]
+            continue
         if m:
-            if current_no is not None and buf:
-                items.append((current_no,' '.join(buf).strip()))
-            current_no=int(m.group(1)); buf=[m.group(2).strip()]
-        elif current_no is not None:
-            # Continuation lines belong to the current numbered item.
+            no=int(m.group(1)); body=m.group(2).strip()
+            if no==expected_no:
+                flush(); current_no=no; expected_no+=1; buf=[body]
+                continue
+            # A number that resets/skips is a nested rule/list entry belonging
+            # to the current top-level request item. Preserve it as specification.
+            if current_no is not None:
+                buf.append(line)
+            continue
+        if current_no is not None and line:
             buf.append(line)
     else:
-        if current_no is not None and buf:
-            items.append((current_no,' '.join(buf).strip()))
-    # Deduplicate by form number, keeping the longest text representation.
-    by_no={}
-    for no,body in items:
-        if no not in by_no or len(body)>len(by_no[no]): by_no[no]=body
-    return [(n,by_no[n]) for n in sorted(by_no)]
+        flush()
+    return items
 
 
 def _checkbox_selection(body: str) -> str:
     t=str(body or '').replace('：',':')
-    # Word text extraction preserves the filled/empty square characters.
     if re.search(r'■\s*Yes',t,re.I): return 'YES'
     if re.search(r'■\s*No',t,re.I): return 'NO'
-    # Multi-choice fields (e.g. internal/customer model or Comtrend/Customer S/N).
     if '■' in t:
         after=t.split('■',1)[1].strip()
-        return ('SELECTED: '+after[:80]).strip()
+        return ('SELECTED: '+after[:120]).strip()
     return ''
+
+
+def _form_label(no: int, text: str) -> str:
+    t=' '.join(str(text or '').split())
+    if not t:
+        return f'Item {no} (visual/unspecified)'
+    head=re.split(r'[:：]',t,maxsplit=1)[0].strip()
+    # Keep concise identifiers while avoiding whole rule paragraphs in the UI.
+    return (head or f'Item {no}')[:72]
 
 
 def _classify_form_item(no: int, body: str) -> dict:
@@ -341,49 +489,91 @@ def _classify_form_item(no: int, body: str) -> dict:
     selected=_checkbox_selection(t)
     required=(selected != 'NO')
     typ='Needs Review'; role='DETAIL'; mapping=[]; expected=''
-    if 'logo' in low:
-        typ='Golden Artwork'; role='BASIC'; mapping=['Artwork: COMTREND Logo']
-    elif any(k in low for k in ('fcc mark','weee mark','ce mark','ic mark','ul file listing')):
-        typ='Golden Artwork'; role='COMPLIANCE'
-        if 'weee' in low: mapping=['Artwork: WEEE Mark']
-        elif 'ce mark' in low: mapping=['Artwork: CE Mark']
+    field_key=''
+    rule_known=False
+
+    # A printed WiFi Key item may contain an attached QR rule in its
+    # continuation text. Keep the numbered item as WiFi Key and attach the QR
+    # as a mandatory secondary machine-code check instead of changing its type.
+    if low.startswith('wifi key'):
+        typ='Golden Variable'; role='WIFI'; mapping=['Variable: WiFi Key Format']; rule_known=True
+    # Machine-code semantics are classified before generic text.  A code item
+    # is never bypassed merely because its payload/format is not fully defined.
     elif 'qr code' in low or re.search(r'\bqr\b',low):
-        typ='Golden QR'; role='WIFI'; mapping=['Variable: WiFi QR Format']
-    elif 's/n number' in low or ('serial' in low and 'number' in low):
-        typ='Golden Barcode'; role='IDENTITY'; mapping=['Variable: S/N Human Readable Format','Variable: S/N Barcode Format','Consistency: S/N Text vs Barcode']
-    elif 'mac number' in low:
-        typ='Golden Barcode'; role='IDENTITY'; mapping=['Variable: MAC Human Readable Format','Variable: MAC Barcode Format','Consistency: MAC Text vs Barcode']
+        typ='Golden QR'; role='WIFI'; field_key='qr'
+        # The existing automatic QR engine can validate SSID/SN/MAC/WiFi-Key
+        # style payloads. If the controlled QR also includes an unsupported
+        # field such as Password, retain the QR item but route it to manual
+        # review rather than pretending the full payload was auto-validated.
+        unsupported=('password' in low)
+        mapping=[] if unsupported else ['Variable: WiFi QR Format']
+        rule_known=bool(re.search(r'(?:內容|含|content|payload)',t,re.I)) and not unsupported
     elif 'gpon sn' in low or 'gpon s/n' in low:
-        typ='Golden Barcode'; role='IDENTITY'; mapping=['Variable: GPON S/N Human Readable Format','Variable: GPON S/N Barcode Format','Consistency: GPON S/N Text vs Barcode']
+        typ='Golden Barcode'; role='IDENTITY'; field_key='gpon_sn'
+        mapping=['Variable: GPON S/N Human Readable Format','Variable: GPON S/N Barcode Format','Consistency: GPON S/N Text vs Barcode']
+        rule_known=bool(re.search(r'(?:434D5444|last\s+8|16\s*characters)',t,re.I))
+    elif 's/n number' in low or re.match(r'^s\s*/\s*n\s*:',low) or ('serial' in low and 'number' in low):
+        typ='Golden Barcode'; role='IDENTITY'; field_key='sn'
+        mapping=['Variable: S/N Human Readable Format','Variable: S/N Barcode Format','Consistency: S/N Text vs Barcode']
+        rule_known=bool(re.search(r'(?:\d+\s*(?:characters|碼)|YYM|fixed|固定)',t,re.I))
+    elif 'mac number' in low or re.match(r'^mac\s*:',low):
+        typ='Golden Barcode'; role='IDENTITY'; field_key='mac'
+        mapping=['Variable: MAC Human Readable Format','Variable: MAC Barcode Format','Consistency: MAC Text vs Barcode']
+        # MAC syntax itself is a known validated engine field even when the form
+        # only says Code128 / N MACs per unit.
+        rule_known=True
+    elif 'barcode' in low or 'bar code' in low or 'code 128' in low or 'code type' in low:
+        typ='Golden Barcode'; role='DETAIL'; field_key='barcode'; rule_known=False
+    elif any(k in low for k in ('comtrend logo','fcc mark','weee mark','ce mark','ic mark','ul file listing','安規 logo','安規logo')) or (low.endswith('logo') and low):
+        typ='Golden Artwork'; role='COMPLIANCE' if 'comtrend logo' not in low else 'BASIC'
+        if 'comtrend' in low: mapping=['Artwork: COMTREND Logo']
+        elif 'weee' in low: mapping=['Artwork: WEEE Mark']
+        elif 'ce mark' in low: mapping=['Artwork: CE Mark']
     elif low.startswith('ssid') or ' ssid' in low:
-        typ='Golden Variable'; role='WIFI'; mapping=['Variable: SSID Format']
-    elif 'wifi key' in low:
-        typ='Golden Variable'; role='WIFI'; mapping=['Variable: WiFi Key Format']
-    elif 'part no' in low or 'part number' in low:
-        typ='Golden Variable'; role='BASIC'; mapping=['Variable: P/N Format']
+        typ='Golden Variable'; role='WIFI'; mapping=['Variable: SSID Format']; rule_known=True
+    elif re.match(r'^password\b',low):
+        typ='Golden Variable'; role='WIFI'; mapping=['Variable: Password Format']; rule_known=True
+    elif 'part no' in low or 'part number' in low or low.startswith('p/n'):
+        typ='Golden Variable'; role='BASIC'; mapping=['Variable: P/N Format']; rule_known=True
     elif 'model name' in low or low.startswith('model'):
-        typ='Golden Choice'; role='BASIC'; mapping=['Fixed: model']
+        typ='Golden Choice'; role='BASIC'; mapping=['Fixed: model']; rule_known=True
     elif 'made in' in low:
-        typ='Golden Choice'; role='COMPLIANCE'; mapping=['Variable: Made in Format']
-    elif any(k in low for k in ('input','usb ','encryption type','product')):
-        typ='Golden Text'; role='BASIC'
+        typ='Golden Choice'; role='COMPLIANCE'; mapping=['Variable: Made in Format']; rule_known=True
+    elif low.startswith('input') or low.startswith('usb ') or 'encryption type' in low or low.startswith('product'):
+        typ='Golden Text'; role='BASIC'; rule_known=True
         expected=(re.split(r'[:：]',t,maxsplit=1)[1].strip() if re.search(r'[:：]',t) else t)
-    elif any(k in low for k in ('fcc id','add ')):
-        typ='Golden Text'; role='COMPLIANCE'
-        expected=(re.split(r'[:：]',t,maxsplit=1)[1].strip() if re.search(r'[:：]',t) else t)
-    label=re.split(r'[:：]',t,maxsplit=1)[0].strip() or f'Item {no}'
+    elif any(k in low for k in ('ip address','username','gpon voip gateway','class 1 laser product','comtrend central europe','fcc id','ic id')):
+        typ='Golden Text'; role='COMPLIANCE' if any(k in low for k in ('class 1 laser','comtrend central europe','fcc id','ic id')) else 'BASIC'
+        rule_known=True
+        # For literal label text, preserve the controlled phrase itself.
+        expected=t
+    elif t:
+        # The user requirement is non-bypass: every numbered form item remains
+        # visible even if the engine cannot infer a safe automatic rule.
+        typ='Needs Review'; role='DETAIL'; rule_known=False
+
+    # A numbered item may define a printed field AND a machine code in its
+    # continuation text (for example WiFi Key + QR payload). Preserve both.
+    if typ=='Golden Variable' and ('qr code' in low or re.search(r'\bqr\b',low)):
+        if 'Variable: WiFi QR Format' not in mapping:
+            mapping.append('Variable: WiFi QR Format')
+        field_key='qr'
+        rule_known=bool(re.search(r'(?:內容|含|content|payload)',t,re.I))
+    label=_form_label(no,t)
     presence_item=''
-    if typ=='Golden QR':
+    if field_key=='qr':
         presence_item=f'Golden Machine Code: QR #{no}'
     elif typ=='Golden Barcode':
-        presence_item=f'Golden Machine Code: Barcode #{no}'
+        suffix={'sn':'S/N','mac':'MAC','gpon_sn':'GPON S/N'}.get(field_key,'Barcode')
+        presence_item=f'Golden Machine Code: {suffix} #{no}'
     return {
-        'form_no':no,'item':f'Golden #{no}: {label[:55]}','type':typ,'role':role,
+        'form_no':no,'item':f'Golden #{no}: {label}','type':typ,'role':role,
         'required':required,'selected':selected,'expected':expected,'raw_text':t,
         'origin':'GOLDEN','source':'Golden','engine_items':mapping,
-        'presence_item':presence_item,
-        'manual_review_allowed':typ in ('Golden Text','Golden Artwork','Golden Choice','Golden QR','Golden Barcode','Needs Review'),
-        'review_status':'NEEDS_REVIEW' if typ=='Needs Review' else 'AUTO_CLASSIFIED',
+        'presence_item':presence_item,'machine_code_field':field_key,
+        'machine_code_rule_known':bool(rule_known),
+        'manual_review_allowed':True,
+        'review_status':'NEEDS_REVIEW' if (typ=='Needs Review' or (typ in ('Golden QR','Golden Barcode') and not rule_known)) else 'AUTO_CLASSIFIED',
     }
 
 
@@ -495,10 +685,20 @@ def _rules_from_golden_text(text: str) -> dict:
         if 'wifi key' in qlow or 'wifikey' in qlow: qfields.append('wifi_key')
         if 'ssid' in qlow: qfields.append('ssid')
         if qfields: rules['qr_payload_fields']=qfields
-    # S/N length is explicitly controlled in these forms (e.g. Comtrend 20 碼).
+    # S/N length is explicitly controlled in these forms. Support both
+    # 'S/N Number ... Comtrend (20 碼)' and legacy 'S/N: pattern (18 characters)'.
     snm=re.search(r'S\s*/\s*N\s*Number.*?Comtrend\s*\((\d{1,2})\s*碼\)',t,re.I)
+    if not snm:
+        snm=re.search(r'(?<!GPON\s)S\s*/\s*N\s*:[^\n]{0,120}?\((\d{1,2})\s*characters?\)',t,re.I)
     if snm:
         n=int(snm.group(1)); rules['sn_regex']=rf'[A-Z0-9-]{{{n}}}'; rules['sn_display']=f'{n} A-Z / 0-9 / -'
+    # GPON formats are often structurally related to MAC and may overlap broad
+    # S/N regexes. Persist prefix/length so decoder classification is field-safe.
+    gpm=re.search(r'GPON\s*S\s*/?\s*N\s*:\s*([0-9A-F]{4,16})X+\s*\((\d{1,2})\s*characters?\)',t,re.I)
+    if gpm:
+        prefix=gpm.group(1).upper(); n=int(gpm.group(2))
+        rules['gpon_prefix']=prefix
+        rules['gpon_regex']=re.escape(prefix)+rf'[0-9A-F]{{{max(0,n-len(prefix))}}}'
     countries=[]
     if re.search(r'Made\s+in\s+Taiwan\s*/\s*China|Made\s+in\s+China\s*/\s*Taiwan',t,re.I):
         countries=['China','Taiwan']
@@ -681,6 +881,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     staging=external_profile_dir()/'golden_assets'/'_import_staging'
     staging.mkdir(parents=True,exist_ok=True)
     text,images,actual_source=_extract_text_and_media(source,staging)
+    final_label_media_names=_docx_final_label_media_names(actual_source) if actual_source.suffix.lower()=='.docx' else []
 
     profile=_clean_engine_template(base_profile)
     model=_candidate_model(text, '') or _candidate_model(source.name, '')
@@ -738,7 +939,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.13',
+        'profile_version':'1.9.15',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -760,6 +961,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
             'image_ocr_text_length':len(image_ocr_text),
             'image_ocr_results':image_ocr_rows,
             'machine_codes':machine_codes,
+            'final_label_document_candidates':final_label_media_names,
         },
     })
     if identity['model']:
@@ -834,13 +1036,16 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
         'action':'AUTO_GOLDEN_IMPORT','item_count':len(rows),
         'document_item_count':len(form_items),
     }]
-    layout=_largest_image(tx_images)
+    layout,layout_score,layout_reason=select_final_label_image(tx_images,image_ocr_rows,machine_codes,final_label_media_names)
     if layout:
         try:
             rel=layout.relative_to(tx_root)
             profile.setdefault('golden_import',{})['candidate_layout_image']=str(root/rel)
         except Exception:
             profile.setdefault('golden_import',{})['candidate_layout_image']=str(root/'imported_media'/layout.name)
+        profile.setdefault('golden_import',{})['candidate_layout_score']=round(float(layout_score),3)
+        profile.setdefault('golden_import',{})['candidate_layout_reason']=layout_reason
+        profile.setdefault('golden_import',{})['candidate_layout_policy']='FINAL_LABEL_SCORE_V1'
     profile['golden_import']['embedded_image_count']=len(tx_images)
     profile['golden_import']['import_generation']=source_sha[:12]
 
@@ -955,7 +1160,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.13'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.15'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})
