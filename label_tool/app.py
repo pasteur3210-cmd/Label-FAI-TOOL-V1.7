@@ -13,10 +13,11 @@ from datetime import datetime
 import pathlib
 
 import cv2
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 
 from . import __version__
 from .core.engine import InspectionEngine
+from .core.artwork_presence import resolve_artwork_file
 from .core.multi_image_inspection import MultiImageInspectionEngine
 from .core.profile_manager import discover_profiles
 from .core.golden_profile_manager import (build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors,
@@ -385,7 +386,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.12'
+                working['profile_version']='1.9.13'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -571,7 +572,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.12 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.13 Dynamic Golden + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -2058,12 +2059,111 @@ class App(tk.Tk):
             pass
         return ''
 
-    def _golden_review_region(self, item: str):
-        """Return (image_path, crop_box, description) for the selected item.
+    def _golden_review_artwork_marker(self, item: str, path: str, gi: dict):
+        """Best-effort, conservative artwork locator for MANUAL REVIEW only.
 
-        V1.9.12 uses strict type-safe Golden mapping: Artwork defaults to the full Golden unless an explicit verified Artwork ROI exists; QR/barcodes and Golden text may use their own typed ROIs.
-        If an ROI cannot be mapped, the caller shows the whole Golden and
-        clearly tells the operator that no automatic ROI was available.
+        This never changes automatic PASS/FAIL. It exists only to help the
+        operator find the currently reviewed symbol on the complete Golden.
+        A marker is returned only when the location is strongly supported by
+        an exact Golden OCR alias (COMTREND) or a high-confidence generic
+        artwork template match. Otherwise the caller shows the full Golden
+        without a marker rather than guessing.
+        """
+        if not path or not os.path.exists(path):
+            return None, 'Artwork location unavailable'
+        name=str(item or '').upper()
+
+        # Text-logo locator: exact/high-specificity OCR alias only. Do NOT use
+        # fuzzy matching here because that previously sent COMTREND review to
+        # unrelated WiFi/SSID text.
+        if 'COMTREND' in name:
+            for ocr in gi.get('image_ocr_results',[]) or []:
+                opath=str(ocr.get('file','') or '')
+                if opath and pathlib.Path(opath).resolve()!=pathlib.Path(path).resolve():
+                    continue
+                for line in ocr.get('lines',[]) or []:
+                    txt=''.join(re.findall(r'[A-Z0-9]+',str(line.get('text','')).upper()))
+                    if txt != 'COMTREND':
+                        continue
+                    pts=line.get('box',[]) or []
+                    if len(pts)>=2:
+                        xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
+                        try:
+                            with Image.open(path) as im:
+                                padx=max(25,int(im.width*0.025)); pady=max(20,int(im.height*0.025))
+                                box=(max(0,int(min(xs))-padx),max(0,int(min(ys))-pady),
+                                     min(im.width,int(max(xs))+padx),min(im.height,int(max(ys))+pady))
+                            if box[2]>box[0] and box[3]>box[1]:
+                                return box,'Artwork marker: exact Golden OCR COMTREND logo'
+                        except Exception:
+                            pass
+
+        # Generic symbol templates are used ONLY as an operator navigation aid.
+        template_map={
+            'WEEE':'grg4297u_chassis/weee_mark.png',
+            'COMTREND':'grg4297u_chassis/comtrend_logo.png',
+            'CE MARK':'grg4297u_chassis/ce_mark.png',
+            'ROHS':'grg4297u_chassis/rohs_mark.png',
+            'RECYCL':'grg4297u_chassis/recycling_mark.png',
+        }
+        rel=None
+        for key,val in template_map.items():
+            if key in name:
+                rel=val; break
+        if not rel:
+            return None,'Artwork review: no trusted locator for this symbol'
+        try:
+            templ,_tpath,_audit=resolve_artwork_file(rel)
+            if templ is None or not getattr(templ,'size',0):
+                return None,'Artwork review: reference locator template unavailable; showing full Golden'
+            data=cv2.imdecode(__import__('numpy').fromfile(str(path),dtype='uint8'),cv2.IMREAD_GRAYSCALE)
+            if data is None or not getattr(data,'size',0):
+                return None,'Artwork review: Golden image cannot be decoded for marker search'
+            best=(-1.0,None)
+            for scale in (0.45,0.55,0.65,0.75,0.9,1.0,1.15,1.3,1.5,1.75,2.0):
+                tw=max(8,int(templ.shape[1]*scale)); th=max(8,int(templ.shape[0]*scale))
+                if tw>=data.shape[1] or th>=data.shape[0]:
+                    continue
+                t=cv2.resize(templ,(tw,th),interpolation=cv2.INTER_AREA if scale<1 else cv2.INTER_CUBIC)
+                res=cv2.matchTemplate(data,t,cv2.TM_CCOEFF_NORMED)
+                _mn,mx,_ml,loc=cv2.minMaxLoc(res)
+                if float(mx)>best[0]:
+                    best=(float(mx),(int(loc[0]),int(loc[1]),int(loc[0]+tw),int(loc[1]+th)))
+            # Deliberately conservative. If uncertain, show full Golden only.
+            if best[1] and best[0]>=0.62:
+                x1,y1,x2,y2=best[1]
+                padx=max(12,int((x2-x1)*0.20)); pady=max(12,int((y2-y1)*0.20))
+                box=(max(0,x1-padx),max(0,y1-pady),min(data.shape[1],x2+padx),min(data.shape[0],y2+pady))
+                return box,f'Artwork marker: template located score={best[0]:.3f}'
+
+            # WEEE often has no standalone raster template in Word (it may be
+            # embedded as EMF). When a QR location is known, provide a broad
+            # navigation HINT below/around that QR rather than pretending an
+            # exact symbol ROI. The full Golden remains visible and Focus Item
+            # stays disabled for this suggested-only marker.
+            if 'WEEE' in name:
+                qrs=[c for c in (gi.get('machine_codes',[]) or []) if str(c.get('kind','')).upper()=='QR']
+                if qrs:
+                    pts=qrs[0].get('points',[]) or []
+                    if len(pts)>=2:
+                        xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
+                        qx1,qx2=int(min(xs)),int(max(xs)); qy1,qy2=int(min(ys)),int(max(ys))
+                        qw=max(30,qx2-qx1); qh=max(30,qy2-qy1)
+                        box=(max(0,qx1-int(qw*0.35)), max(0,qy2-int(qh*0.10)),
+                             min(data.shape[1],qx2+int(qw*0.35)), min(data.shape[0],qy2+int(qh*1.35)))
+                        if box[2]>box[0] and box[3]>box[1]:
+                            return box,'Suggested WEEE search area from Golden QR/layout (not a verified ROI)'
+            return None,f'Artwork review: locator confidence too low ({best[0]:.3f}); showing full Golden'
+        except Exception as exc:
+            return None,f'Artwork review: locator unavailable ({exc}); showing full Golden'
+
+    def _golden_review_region(self, item: str):
+        """Return (image_path, focus_box, description) for the selected item.
+
+        V1.9.13 keeps strict type-safe mapping while adding a safe navigation
+        marker for manual review. The returned box may be used both to draw a
+        highlight on the COMPLETE Golden and, when reliable, for Focus Item.
+        Automatic inspection decisions are never changed by this helper.
         """
         path=self._golden_review_image_path()
         try:
@@ -2080,14 +2180,6 @@ class App(tk.Tk):
             actual=str(ev.actual if ev else '')
             typ=str((row or {}).get('type',''))
 
-            # V1.9.12 safety rule: Artwork must NEVER borrow an OCR-text ROI.
-            # Imported Word/DOCX Golden files often provide a whole-label example
-            # but no verified per-artwork coordinates. In that case the safest
-            # operator reference is the complete Golden label. A wrong crop is
-            # worse than a full-image fallback because it can mislead manual
-            # review (e.g. COMTREND Logo previously focused on WiFi/SSID text).
-            # Artwork focus is allowed only when a future profile explicitly
-            # provides a verified artwork_review_roi.
             is_artwork=(typ=='Golden Artwork' or str(item).startswith('Artwork: '))
             if is_artwork:
                 explicit=(row or {}).get('artwork_review_roi')
@@ -2095,7 +2187,6 @@ class App(tk.Tk):
                     try:
                         with Image.open(path) as im:
                             vals=[float(x) for x in explicit]
-                            # Accept normalized [0..1] ROI or absolute pixels.
                             if all(0.0 <= x <= 1.0 for x in vals):
                                 x1,y1,x2,y2=vals
                                 box=(int(x1*im.width),int(y1*im.height),int(x2*im.width),int(y2*im.height))
@@ -2105,9 +2196,9 @@ class App(tk.Tk):
                                 return path,box,'Verified Artwork ROI from Golden Profile'
                     except Exception:
                         pass
-                return path,None,'Artwork review: showing full Golden image (no verified Artwork ROI)'
+                marker,note=self._golden_review_artwork_marker(item,path,gi)
+                return path,marker,note
 
-            # Machine codes have deterministic polygons from Golden import.
             if typ in ('Golden QR','Golden Barcode') or 'QR' in item.upper() or 'BARCODE' in item.upper():
                 want='QR' if (typ=='Golden QR' or 'QR' in item.upper()) else 'BARCODE'
                 codes=[c for c in (gi.get('machine_codes',[]) or []) if str(c.get('kind','')).upper()==want]
@@ -2126,7 +2217,7 @@ class App(tk.Tk):
                             return cpath,box,f'{want} ROI from imported Golden'
                         except Exception:
                             pass
-            # Text fields: use OCR line boxes captured when the Golden was imported.
+
             target=' '.join(str(x) for x in ((row or {}).get('expected',''),(row or {}).get('raw_text',''),item) if x).strip()
             if target:
                 import difflib
@@ -2157,12 +2248,12 @@ class App(tk.Tk):
                             pass
         except Exception:
             pass
-        return path,None,'Golden ROI not mapped; showing full Golden image'
+        return path,None,'Golden item location not verified; showing full Golden image'
 
     def _show_manual_golden_review(self, items: list[str], note: str):
         """Golden-assisted review for one non-PASS item.
 
-        V1.9.12 UI safety rules:
+        V1.9.13 UI safety rules:
         - Action buttons are placed above the image comparison area, so the
           Windows taskbar can never cover the only decision controls.
         - The popup size is calculated from the current screen instead of a
@@ -2214,7 +2305,7 @@ class App(tk.Tk):
         if mode=='REVIEW_ONLY':
             ttk.Label(top,text='REVIEW ONLY：此項為身分/條碼/一致性資料，可人工確認或要求重讀，但不可用單次目視直接覆寫成 PASS。',foreground='#A00000').pack(anchor='w',pady=(3,0))
 
-        # V1.9.12: keep the decision bar permanently visible ABOVE the images.
+        # V1.9.13: keep the decision bar permanently visible ABOVE the images.
         actions=ttk.Frame(win,padding=(8,4)); actions.pack(fill='x')
         ttk.Label(actions,text=f'Note: {note}',foreground='#444').pack(side='left',padx=(0,8))
 
@@ -2275,25 +2366,59 @@ class App(tk.Tk):
                 ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
         put_image(left,actual_path,'No evidence image is available for this item.',caption=os.path.basename(actual_path) if actual_path else '')
 
-        # V1.9.12: the operator always starts from the COMPLETE Golden label.
+        # V1.9.13: the operator always starts from the COMPLETE Golden label.
         # A typed/verified focus crop is an optional aid, never the only
         # reference. This prevents an incorrect ROI mapping from misleading a
         # factory manual decision.
         golden_controls=ttk.Frame(right); golden_controls.pack(fill='x',pady=(0,4))
         golden_view=ttk.Frame(right); golden_view.pack(fill='both',expand=True)
 
-        def render_golden(crop_box=None,caption=''):
+        view_state=tk.StringVar(value='Full Golden / 完整Golden')
+        def render_golden(crop_box=None,caption='',highlight_box=None):
             for child in golden_view.winfo_children():
                 child.destroy()
-            put_image(golden_view,golden_path,'No Golden layout image is available. Review the Golden/Profile before manual decision.',crop_box=crop_box,caption=caption)
+            if not golden_path or not os.path.exists(golden_path):
+                ttk.Label(golden_view,text='No Golden layout image is available. Review the Golden/Profile before manual decision.',anchor='center',wraplength=max_img_w-30).pack(fill='both',expand=True)
+                return
+            try:
+                im=Image.open(golden_path).convert('RGB')
+                if crop_box:
+                    im=im.crop(crop_box)
+                    view_state.set('Focus Item / 項目放大')
+                else:
+                    view_state.set('Full Golden / 完整Golden')
+                    if highlight_box:
+                        draw=ImageDraw.Draw(im)
+                        x1,y1,x2,y2=[int(v) for v in highlight_box]
+                        line_w=max(4,int(min(im.size)*0.006))
+                        for off in range(line_w):
+                            draw.rectangle((max(0,x1-off),max(0,y1-off),min(im.width-1,x2+off),min(im.height-1,y2+off)),outline=(220,35,35))
+                        label=f'REVIEW: {item}'
+                        tx=max(2,x1); ty=max(2,y1-24)
+                        # High-contrast tag; default PIL font avoids external font dependencies.
+                        try:
+                            bbox=draw.textbbox((tx,ty),label)
+                            draw.rectangle((bbox[0]-3,bbox[1]-2,bbox[2]+3,bbox[3]+2),fill=(255,255,255))
+                        except Exception:
+                            pass
+                        draw.text((tx,ty),label,fill=(220,35,35))
+                im.thumbnail((max_img_w,max_img_h),Image.Resampling.LANCZOS)
+                ph=ImageTk.PhotoImage(im); photos.append(ph)
+                ttk.Label(golden_view,image=ph,anchor='center').pack(fill='both',expand=True)
+                ttk.Label(golden_view,text=caption or os.path.basename(golden_path),foreground='#666',wraplength=max_img_w-20).pack(anchor='center',pady=(3,0))
+                ttk.Label(golden_view,textvariable=view_state,foreground='#444').pack(anchor='center',pady=(1,0))
+            except Exception as exc:
+                ttk.Label(golden_view,text=f'Cannot open Golden image: {exc}').pack(fill='both',expand=True)
 
-        ttk.Button(golden_controls,text='Full Golden / 完整Golden',command=lambda:render_golden(None,'Full Golden reference')).pack(side='left',padx=(0,4))
-        focus_btn=ttk.Button(golden_controls,text='Focus Item / 項目放大',command=lambda:render_golden(golden_crop,golden_focus_note))
+        full_btn=ttk.Button(golden_controls,text='Full Golden / 完整Golden',command=lambda:render_golden(None,'Full Golden reference',golden_crop))
+        full_btn.pack(side='left',padx=(0,4))
+        focus_btn=ttk.Button(golden_controls,text='Focus Item / 項目放大',command=lambda:render_golden(golden_crop,golden_focus_note,None))
         focus_btn.pack(side='left')
-        if not golden_crop:
+        golden_focus_allowed=bool(golden_crop) and not str(golden_focus_note).startswith('Suggested ')
+        if not golden_focus_allowed:
             focus_btn.config(state='disabled')
         ttk.Label(golden_controls,text=golden_focus_note,foreground='#666',wraplength=max_img_w-190).pack(side='left',padx=(8,0))
-        render_golden(None,'Full Golden reference')
+        render_golden(None,'Full Golden reference',golden_crop)
         win._review_photos=photos
 
     def manual_review_selected(self):
@@ -2421,7 +2546,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.12 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.13 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.
