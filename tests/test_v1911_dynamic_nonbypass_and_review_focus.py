@@ -40,7 +40,9 @@ def test_dynamic_full_path_isolated_from_legacy_base_inspection_source():
 
 def test_session_raw_fields_keep_qr_sn_and_mac_for_qr_fusion():
     src=(Path(__file__).parents[1]/'label_tool'/'core'/'multi_image_inspection.py').read_text(encoding='utf-8')
-    raw=src[src.index('RAW_FIELD_KEYS = ['):src.index(']\n\n\n@dataclass',src.index('RAW_FIELD_KEYS = ['))+1]
+    start=src.index('RAW_FIELD_KEYS = [')
+    end=src.index(']\n\nIDENTITY_REVIEW_ITEM',start) if ']\n\nIDENTITY_REVIEW_ITEM' in src[start:] else src.index(']\n\n\n@dataclass',start)
+    raw=src[start:end+1]
     assert '"qr_sn"' in raw and '"qr_mac"' in raw
 
 

@@ -28,8 +28,8 @@ class V198Tests(unittest.TestCase):
     def test_all_nonpass_items_have_attention_mode(self):
         self.assertEqual(MultiImageInspectionEngine.manual_attention_mode('Artwork: WEEE Mark'),'OVERRIDE_ALLOWED')
         self.assertEqual(MultiImageInspectionEngine.manual_attention_mode('Fixed: model'),'OVERRIDE_ALLOWED')
-        self.assertEqual(MultiImageInspectionEngine.manual_attention_mode('Variable: MAC Barcode Format'),'REVIEW_ONLY')
-        self.assertEqual(MultiImageInspectionEngine.manual_attention_mode('Consistency: MAC Text vs Barcode'),'REVIEW_ONLY')
+        self.assertEqual(MultiImageInspectionEngine.manual_attention_mode('Variable: MAC Barcode Format'),'OVERRIDE_ALLOWED')
+        self.assertEqual(MultiImageInspectionEngine.manual_attention_mode('Consistency: MAC Text vs Barcode'),'OVERRIDE_ALLOWED')
 
     def test_review_only_action_is_logged_without_overriding_auto(self):
         profile={'live':{'required_items':['Variable: MAC Barcode Format']}}
@@ -40,7 +40,7 @@ class V198Tests(unittest.TestCase):
             eng._write_excel=lambda result,expected: str(Path(td)/'report.xlsx')
             out=eng.record_manual_review_action(r,'Variable: MAC Barcode Format','CONFIRM_FAIL','operator checked')
             self.assertEqual(out.evidence['Variable: MAC Barcode Format'].result,'FAIL')
-            self.assertEqual(out.manual_reviews[-1]['mode'],'REVIEW_ONLY')
+            self.assertEqual(out.manual_reviews[-1]['mode'],'OVERRIDE_ALLOWED')
             self.assertEqual(out.manual_reviews[-1]['action'],'CONFIRM_FAIL')
             data=json.loads((Path(td)/'result.json').read_text(encoding='utf-8'))
             self.assertEqual(data['manual_reviews'][-1]['item'],'Variable: MAC Barcode Format')

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.16 integration gate.
+"""V1.9.17 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -173,7 +173,7 @@ Finished Information:
     # Field-record regression: session fusion must preserve normalized QR S/N +
     # MAC facts and must not turn a single-image QR PASS into a conflict.
     fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
-    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.16')
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.17')
     mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
     mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
     best={}; conflicts={}

@@ -65,5 +65,5 @@ def test_manual_review_visual_item_is_traceable_and_identity_is_blocked(tmp_path
 
     assert engine._manual_review_allowed('Fixed: GPON VoIP Gateway')
     assert engine._manual_review_allowed('Artwork: CE Mark')
-    assert not engine._manual_review_allowed('Variable: S/N Barcode Format')
-    assert not engine._manual_review_allowed('Consistency: S/N Text vs Barcode')
+    assert engine._manual_review_allowed('Variable: S/N Barcode Format')
+    assert engine._manual_review_allowed('Consistency: S/N Text vs Barcode')
