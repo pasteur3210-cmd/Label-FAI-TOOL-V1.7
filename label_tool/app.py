@@ -18,7 +18,7 @@ from PIL import Image, ImageTk, ImageDraw
 from . import __version__
 from .core.engine import InspectionEngine
 from .core.artwork_presence import resolve_artwork_file
-from .core.multi_image_inspection import MultiImageInspectionEngine
+from .core.multi_image_inspection import MultiImageInspectionEngine, IDENTITY_REVIEW_ITEM
 from .core.profile_manager import discover_profiles
 from .core.golden_profile_manager import (build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors,
     _dynamic_item_rows, apply_editable_items, save_profile_identity_edits, STANDARD_LIBRARY, validation_readiness_errors, validation_readiness_summary, normalize_dynamic_profile_for_runtime, select_final_label_image)
@@ -386,7 +386,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.16'
+                working['profile_version']='1.9.17'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -580,7 +580,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.16 Form-driven Golden + deterministic item reference + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.17 Form-driven Golden + deterministic item reference + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -637,7 +637,7 @@ class App(tk.Tk):
         name=self.profile_var.get()
         if not name or name not in self.profiles:return
         path,data=self.profiles[name]
-        # V1.9.16 compatibility migration: external Dynamic Profiles survive EXE
+        # V1.9.17 compatibility migration: external Dynamic Profiles survive EXE
         # upgrades. Clean stale V1.9.13-era generated Golden Text and rebuild
         # runtime requirements from numbered Request-Form rows before engines
         # are created. This prevents old password/support text from reappearing
@@ -2040,6 +2040,8 @@ class App(tk.Tk):
             except Exception:pass
             return
         candidates=[]
+        if result.identity_status == "MISMATCH" and not result.manual_overrides.get(IDENTITY_REVIEW_ITEM):
+            candidates.append((IDENTITY_REVIEW_ITEM,"IDENTITY_MISMATCH",self.multi_image_engine.manual_attention_mode(IDENTITY_REVIEW_ITEM)))
         required=self.multi_image_engine._required_items()
         for item in required:
             ev=result.evidence.get(item)
@@ -2071,7 +2073,7 @@ class App(tk.Tk):
     def _golden_form_row_for_item(self, item: str) -> dict | None:
         """Resolve inspection item -> numbered Request-Form row deterministically.
 
-        V1.9.16 rule: once a numbered Golden exists, the item/reference binding
+        V1.9.17 rule: once a numbered Golden exists, the item/reference binding
         is an ID relationship, never a fuzzy/similarity lookup. Compatibility
         keyword fallback is allowed only for old non-numbered Profiles.
         """
@@ -2090,7 +2092,7 @@ class App(tk.Tk):
                 if item==str(r.get('item','')) or item==str(r.get('presence_item','')) or item in [str(x) for x in (r.get('engine_items',[]) or [])]:
                     return r
             # Numbered Request Form exists => allow only deterministic
-            # semantic aliases for stale pre-V1.9.16 item names. Never use
+            # semantic aliases for stale pre-V1.9.17 item names. Never use
             # similarity/fuzzy matching across numbered rows.
             if any(isinstance(r,dict) and r.get('form_no') is not None for r in rows):
                 up=str(item or '').upper()
@@ -2157,7 +2159,7 @@ class App(tk.Tk):
     def _golden_review_image_path(self) -> str:
         """Return the final printed Label Example, never a support screenshot.
 
-        V1.9.16 re-ranks the imported images at review time as a compatibility
+        V1.9.17 re-ranks the imported images at review time as a compatibility
         guard for Profiles imported by older versions whose candidate image was
         chosen by file size.  The scorer rewards label anchors/machine codes and
         penalises prose-heavy password/procedure screenshots.
@@ -2218,7 +2220,12 @@ class App(tk.Tk):
                         xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
                         try:
                             with Image.open(path) as im:
-                                padx=max(25,int(im.width*0.025)); pady=max(20,int(im.height*0.025))
+                                bw=max(1.0,max(xs)-min(xs)); bh=max(1.0,max(ys)-min(ys))
+                                # Use local text-box dimensions instead of a percent
+                                # of the whole Golden image. Whole-image padding made
+                                # the marker visibly drift upward/widen on large Word
+                                # screenshots.
+                                padx=max(8,int(bw*0.10)); pady=max(6,int(bh*0.20))
                                 box=(max(0,int(min(xs))-padx),max(0,int(min(ys))-pady),
                                      min(im.width,int(max(xs))+padx),min(im.height,int(max(ys))+pady))
                             if box[2]>box[0] and box[3]>box[1]:
@@ -2313,7 +2320,7 @@ class App(tk.Tk):
     def _golden_review_region(self, item: str):
         """Return (final_label_path, focus_box, description) for selected item.
 
-        V1.9.16 safety boundary:
+        V1.9.17 safety boundary:
         * visual reference is always the FINAL Label Example;
         * item explanation comes from the controlled Request-Form row;
         * Focus Item may search only OCR/code geometry belonging to that final
@@ -2424,14 +2431,13 @@ class App(tk.Tk):
     def _show_manual_golden_review(self, items: list[str], note: str):
         """Golden-assisted review for one non-PASS item.
 
-        V1.9.16 UI safety rules:
+        V1.9.17 UI safety rules:
         - Action buttons are placed above the image comparison area, so the
           Windows taskbar can never cover the only decision controls.
         - The popup size is calculated from the current screen instead of a
           fixed 1320x790 geometry.
-        - Confirm PASS is always visible. REVIEW_ONLY items show the button in
-          disabled state instead of hiding it, so the operator understands why
-          a PASS override is unavailable.
+        - Confirm PASS is always visible and usable for every non-PASS item.
+          Automatic evidence remains preserved in the audit log/report.
         """
         item=items[0]
         mode=self.multi_image_engine.manual_attention_mode(item)
@@ -2474,9 +2480,9 @@ class App(tk.Tk):
         ttk.Label(top,text=f"Actual: {actual or '-'}   |   Expected: {expected or '-'}",foreground='#444',wraplength=max(760,target_w-50)).pack(anchor='w',pady=(1,0))
         ttk.Label(top,text=f"Reason: {(ev.message if ev else 'No usable evidence')}",foreground='#555',wraplength=max(760,target_w-50)).pack(anchor='w',pady=(1,0))
         if mode=='REVIEW_ONLY':
-            ttk.Label(top,text='REVIEW ONLY：此項為身分/條碼/一致性資料，可人工確認或要求重讀，但不可用單次目視直接覆寫成 PASS。',foreground='#A00000').pack(anchor='w',pady=(3,0))
+            ttk.Label(top,text='此項可人工確認；Automatic Result 會保留於報告與 Log，不會被人工結果覆蓋。',foreground='#8A5A00').pack(anchor='w',pady=(3,0))
 
-        # V1.9.16: keep the decision bar permanently visible ABOVE the images.
+        # V1.9.17: keep the decision bar permanently visible ABOVE the images.
         actions=ttk.Frame(win,padding=(8,4)); actions.pack(fill='x')
         ttk.Label(actions,text=f'Note: {note}',foreground='#444').pack(side='left',padx=(0,8))
 
@@ -2512,8 +2518,6 @@ class App(tk.Tk):
         ttk.Button(actions,text='Recheck / 重新辨識',command=lambda:(save_action('REQUEST_RECHECK'), self.after(100,self.recheck_unresolved))).pack(side='right',padx=3)
         pass_btn=ttk.Button(actions,text='Confirm PASS / 人工確認PASS',command=confirm_pass)
         pass_btn.pack(side='right',padx=3)
-        if mode!='OVERRIDE_ALLOWED':
-            pass_btn.config(state='disabled')
 
         body=ttk.Frame(win,padding=(8,4,8,8)); body.pack(fill='both',expand=True)
         left=ttk.LabelFrame(body,text='Actual / 實拍',padding=6); right=ttk.LabelFrame(body,text='Golden Reference / Golden 對照',padding=6)
@@ -2537,12 +2541,12 @@ class App(tk.Tk):
                 ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
         put_image(left,actual_path,'No evidence image is available for this item.',caption=os.path.basename(actual_path) if actual_path else '')
 
-        # V1.9.16: the operator always starts from the COMPLETE Golden label.
+        # V1.9.17: the operator always starts from the COMPLETE Golden label.
         # A typed/verified focus crop is an optional aid, never the only
         # reference. This prevents an incorrect ROI mapping from misleading a
         # factory manual decision.
         golden_controls=ttk.Frame(right); golden_controls.pack(fill='x',pady=(0,4))
-        # V1.9.16: show the controlled Request-Form explanation separately from
+        # V1.9.17: show the controlled Request-Form explanation separately from
         # the Final Label visual. This prevents support screenshots (password
         # proposals, process notes, etc.) from being mistaken for the Golden
         # reference of MAC/Made-in/other fields.
@@ -2725,7 +2729,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.16 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.17 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

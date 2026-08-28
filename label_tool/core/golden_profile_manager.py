@@ -680,6 +680,13 @@ def _rules_from_golden_text(text: str) -> dict:
     km=re.search(r'WiFi\s*Key\s*:\s*Random\s*(\d{1,2})\s*(?:digits|characters|char|碼)?',t,re.I)
     if km:
         rules['wifi_key_length']=int(km.group(1))
+    # Password length is controlled independently from WiFi Key.  Request
+    # Forms such as GRG-4297u define "Password: Random 8 characters".
+    # Missing this rule previously left password_length at 0 and made every
+    # printed password fail even when OCR read the correct 8-character value.
+    pm=re.search(r'\bPassword\s*:\s*Random\s*(\d{1,2})\s*(?:digits|characters?|char|碼)?',t,re.I)
+    if pm:
+        rules['password_length']=int(pm.group(1))
     # Generic SSID forms may put the example on the next line: SSID / ComtrendXXXX.
     if not rules.get('ssid_prefix'):
         sm=re.search(r'\bSSID\b\s+([A-Za-z][A-Za-z0-9_-]*?)(X{3,})',str(text or ''),re.I)
@@ -951,7 +958,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.16',
+        'profile_version':'1.9.17',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -1022,7 +1029,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     profile['dynamic_standard_items']=[]
     profile=apply_editable_items(profile,rows)
     profile['golden_item_bindings']=_build_golden_item_bindings(profile)
-    profile['runtime_form_driven_version']='1.9.16'
+    profile['runtime_form_driven_version']='1.9.17'
     profile['golden_completeness']={
         'document_item_count':len(form_items),
         'profile_item_count':len(profile.get('golden_form_items',[]) or []),
@@ -1125,14 +1132,23 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
     """
     if not profile.get('dynamic_profile') or not (profile.get('golden_form_items') or []):
         return profile,False,[]
-    if str(profile.get('runtime_form_driven_version',''))=='1.9.16' and profile.get('golden_item_bindings'):
+    if str(profile.get('runtime_form_driven_version',''))=='1.9.17' and profile.get('golden_item_bindings'):
         return profile,False,[]
     before=deepcopy(profile)
     rows=_dynamic_item_rows(profile)
     cleaned=apply_editable_items(profile,rows)
-    cleaned['profile_version']='1.9.16'
-    cleaned['runtime_form_driven_version']='1.9.16'
+    cleaned['profile_version']='1.9.17'
+    cleaned['runtime_form_driven_version']='1.9.17'
     cleaned['golden_item_bindings']=_build_golden_item_bindings(cleaned)
+    # Runtime-rule migration for already-imported external profiles.  V1.9.16
+    # could persist password_length=0 because Password: Random N characters was
+    # not extracted.  Re-derive safe form rules and only fill missing/invalid
+    # values so engineer-edited valid rules are preserved.
+    form_text='\n'.join(str(r.get('raw_text','')) for r in (cleaned.get('golden_form_items',[]) or []) if isinstance(r,dict))
+    derived_rules=_rules_from_golden_text(form_text)
+    current_rules=cleaned.setdefault('rules',{})
+    if int(current_rules.get('password_length',0) or 0) <= 0 and int(derived_rules.get('password_length',0) or 0) > 0:
+        current_rules['password_length']=int(derived_rules['password_length'])
     # Migration is a controlled engine update, not an operator edit. Preserve
     # a previously VALIDATED status only if every required item still has a
     # handling path under the new rules; otherwise DRAFT is safer.
@@ -1249,7 +1265,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.16'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.17'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})

@@ -87,6 +87,8 @@ RAW_FIELD_KEYS = [
     "has_comtrend_address", "has_laser_text",
 ]
 
+IDENTITY_REVIEW_ITEM = "Identity: Cross-Image Consistency"
+
 
 @dataclass
 class ImageEvidence:
@@ -247,16 +249,15 @@ class MultiImageInspectionEngine:
 
     @staticmethod
     def _manual_review_allowed(item: str) -> bool:
-        """Return whether an operator may convert a non-PASS result to MANUAL_PASS.
+        """Return whether an operator may resolve a non-PASS result manually.
 
-        All non-PASS items are still shown in the operator-attention list.
-        Machine identity/barcode/consistency items remain review-only so a
-        human click cannot silently overwrite traceability data.
+        Factory workflow requirement: every non-PASS inspection item must have
+        a traceable manual completion path so production is not blocked by an
+        OCR/decoder limitation.  The original automatic result is NEVER erased;
+        apply_manual_pass stores auto_result/actual/message in manual_overrides
+        and reports the final state as MANUAL_PASS.
         """
-        item = str(item or "")
-        if item.startswith("Fixed: ") or item.startswith("Artwork: ") or item.startswith("Golden #") or item.startswith("Golden Text:"):
-            return True
-        return item in {"Variable: Made in Format"}
+        return bool(str(item or "").strip())
 
     @classmethod
     def manual_attention_mode(cls, item: str) -> str:
@@ -343,9 +344,9 @@ class MultiImageInspectionEngine:
     def apply_manual_pass(self, result: MultiImageResult, items: list[str], note: str = "Visual inspection confirmed") -> MultiImageResult:
         """Apply traceable human visual review to eligible visual items.
 
-        Identity/barcode/consistency items are deliberately blocked from manual
-        override.  The automatic result is preserved in manual_overrides and
-        Excel/result.json; the final state becomes MANUAL_PASS.
+        All non-PASS items may be manually completed for factory usability.
+        The automatic result is preserved in manual_overrides and Excel/result.json;
+        the final state becomes MANUAL_PASS so auditability is retained.
         """
         if result is None:
             raise ValueError("No image inspection result")
@@ -355,9 +356,12 @@ class MultiImageInspectionEngine:
         for item in items:
             item=str(item)
             if not self._manual_review_allowed(item):
-                raise ValueError(f"Manual PASS is not allowed for machine identity/consistency item: {item}")
+                raise ValueError(f"Manual PASS item is blank: {item}")
             old = result.evidence.get(item)
-            auto_result = "CONFLICT" if item in result.conflicts else (old.result if old else "NEED_MORE_IMAGE")
+            if item == IDENTITY_REVIEW_ITEM:
+                auto_result = "IDENTITY_MISMATCH" if result.identity_status == "MISMATCH" else "PASS"
+            else:
+                auto_result = "CONFLICT" if item in result.conflicts else (old.result if old else "NEED_MORE_IMAGE")
             if auto_result in ("PASS", "MANUAL_PASS"):
                 continue
             result.manual_overrides[item] = {
@@ -386,7 +390,8 @@ class MultiImageInspectionEngine:
             elif ev.result == "FAIL":
                 hard_fail.append(item)
         result.unresolved_items=unresolved
-        if result.identity_status == "MISMATCH":
+        identity_manually_resolved = bool(result.manual_overrides.get(IDENTITY_REVIEW_ITEM))
+        if result.identity_status == "MISMATCH" and not identity_manually_resolved:
             result.overall="IDENTITY_MISMATCH"
         elif result.conflicts:
             result.overall="CONFLICT"
@@ -1109,7 +1114,8 @@ class MultiImageInspectionEngine:
             automatic = "PASS"
         result.automatic_overall = automatic
 
-        if result.identity_status == "MISMATCH":
+        identity_manually_resolved = bool(result.manual_overrides.get(IDENTITY_REVIEW_ITEM))
+        if result.identity_status == "MISMATCH" and not identity_manually_resolved:
             final_overall = "IDENTITY_MISMATCH"
         elif conflicts:
             final_overall = "CONFLICT"
