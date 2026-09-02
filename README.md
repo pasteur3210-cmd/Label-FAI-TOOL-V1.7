@@ -1,6 +1,16 @@
-# Label Auto Inspection Tool V1.9.19
+# Label Auto Inspection Tool V1.9.20
 
-## V1.9.19 Program-Plan Alignment (CMP-001 / CMP-002 / CMP-003 / CMP-008)
+## V1.9.20 Production S/N / MAC Range Alignment
+
+- Optional Work Order / Production Data now includes `S/N Start`, `S/N End`, `MAC Start`, `MAC End`, and `MAC Qty / Step`.
+- `Check S/N Range` adds a traceable `Work Order: S/N Range` decision. Shared-prefix trailing numeric sequences are compared numerically; other fixed-width alphanumeric ranges use conservative inclusive comparison.
+- `Check MAC Range` normalizes the 12-HEX MAC and compares it as a 48-bit integer, never as a plain string.
+- `Check MAC Allocation Step` implements the shipment-checker allocation concept: `(Base MAC - MAC Start) % Step == 0`, and also verifies that `Base MAC + Step - 1` does not exceed MAC End. This supports products that consume a fixed number of MAC addresses per unit, e.g. 10.
+- Image and CAM use the same Rule Engine. Enabled production range items are added to required checks; deterministic CAM range failures enter SmartLock fail confirmation instead of waiting forever.
+- Range/step settings are included in image-session cache context and written to Excel/JSON work-order metadata.
+- Legacy OCR, Barcode/QR, Dynamic Golden, Notch, Manual Review and incremental cache decision logic are otherwise unchanged.
+
+## V1.9.20 Program-Plan Alignment (CMP-001 / CMP-002 / CMP-003 / CMP-008)
 
 - CMP-001: Dynamic Golden now distinguishes shipped Chassis Label inspection scope from process/reference or lower production/test zones. Excluded rows remain traceable in Profile Manager as `REFERENCE_ONLY` but do not become runtime requirements.
 - CMP-002 / CMP-003: Password and WiFi Key remain **length-only** checks as requested; no MAC/SN substring exclusion is added in this release.

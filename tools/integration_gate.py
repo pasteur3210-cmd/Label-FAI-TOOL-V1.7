@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.19 integration gate.
+"""V1.9.20 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -175,7 +175,7 @@ Finished Information:
     # Field-record regression: session fusion must preserve normalized QR S/N +
     # MAC facts and must not turn a single-image QR PASS into a conflict.
     fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
-    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.19')
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.20')
     mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
     mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
     best={}; conflicts={}
@@ -211,8 +211,8 @@ Finished Information:
         check(token in app, f'Item-aware Golden review is missing: {token}')
     check('showing full Golden' in app and '_golden_review_artwork_marker' in app, 'Artwork fallback/marker safety is missing')
     check('artwork_review_roi' in app, 'Artwork focus is not restricted to an explicit verified ROI')
-    check('_golden_review_machine_code_box' in app and '_golden_review_field_key' in app, 'V1.9.19 field-safe machine-code review locator is missing')
-    check('factory-review locator: use a callout arrow as' in app and 'draw.polygon([(cx,cy),p1,p2]' in app, 'V1.9.19 arrow/callout Golden locator is missing')
+    check('_golden_review_machine_code_box' in app and '_golden_review_field_key' in app, 'V1.9.20 field-safe machine-code review locator is missing')
+    check('factory-review locator: use a callout arrow as' in app and 'draw.polygon([(cx,cy),p1,p2]' in app, 'V1.9.20 arrow/callout Golden locator is missing')
     check("render_golden(None,'Final Label / Full Golden reference',golden_crop)" in app, 'Manual Review does not start on the complete Final Label with current-item marker')
     check('REVIEW: {item}' in app and 'golden_focus_allowed=bool(golden_crop)' in app, 'Golden current-item highlight / safe Focus policy missing')
     check('Golden Item Specification / Golden 項目說明' in app and '_golden_item_specification' in app, 'Golden item-specific specification panel missing')
@@ -240,7 +240,7 @@ Finished Information:
     check('_docx_final_label_media_names' in gp and 'document:Label Example' in gp, 'Final Label structural document-position guard is missing')
     check('counters[key]=counters.get(key,0)+1' in gp, 'Word list-number reconstruction guard is missing')
 
-    # 9) V1.9.19 alignment: CMP-001 shipped-label scope, CMP-002/003 length-only, CMP-008 notch.
+    # 9) V1.9.20 alignment: CMP-001 shipped-label scope, CMP-002/003 length-only, CMP-008 notch.
     scope_rows=extract_golden_form_items('1. Model: GRG-4297u\n2. 匯入列印方式參考 Chassis Label 列印說明\nFinished Information:')
     scope_meta=_apply_chassis_scope_filter(scope_rows,None,[],[])
     check(scope_rows[0].get('required') is True, 'CMP-001 incorrectly excluded a shipped-label item')
@@ -251,7 +251,20 @@ Finished Information:
     check(notch=='TOP_LEFT' and notch_text, 'CMP-008 notch direction was not extracted from Request Form')
     check('detect_label_notch_direction' in mi and NOTCH_ITEM=='Geometry: Label Notch Direction', 'CMP-008 runtime notch/manual path missing')
 
-    print('[INTEGRATION_GATE][PASS] form-driven completeness, CMP-001 scope filter, CMP-002/003 length-only, CMP-008 notch, barcode/QR non-bypass, dynamic isolation, QR fusion, manual review')
+    # 10) V1.9.20 production allocation gates: S/N inclusive range, MAC HEX
+    # range, and per-unit MAC allocation step/quantity. These are optional WO
+    # inputs and must not alter the Dynamic Golden rules when disabled.
+    range_profile={'fixed_fields':{},'rules':{'sn_regex':r'[0-9A-Z-]{12,32}','sn_display':'Dynamic S/N','mac_regex':r'[0-9A-F]{12}','gpon_regex':r'434D5444[0-9A-F]{8}','password_length':8,'wifi_key_length':14},'live':{'required_items':[]}}
+    range_fields={'sn_text':'2638043UXXF-AN000038','sn_barcode':'2638043UXXF-AN000038','mac_text':'A01842EA800A','mac_barcode':'A01842EA800A'}
+    range_expected={'sn_range_enabled':True,'sn_start':'2638043UXXF-AN000001','sn_end':'2638043UXXF-AN000500','mac_range_enabled':True,'mac_start':'A01842EA8000','mac_end':'A01842EA8FFF','mac_step_enabled':True,'mac_step':'10'}
+    range_rows={r.name:r for r in validate(range_fields,range_profile,range_expected)}
+    check(range_rows.get('Work Order: S/N Range') and range_rows['Work Order: S/N Range'].status=='PASS','S/N production range gate failed integration check')
+    check(range_rows.get('Work Order: MAC Range') and range_rows['Work Order: MAC Range'].status=='PASS','MAC HEX range gate failed integration check')
+    check(range_rows.get('Work Order: MAC Allocation Step') and range_rows['Work Order: MAC Allocation Step'].status=='PASS','MAC allocation step gate failed integration check')
+    check('S/N Start' in app and 'MAC Qty / Step' in app and 'Check MAC Allocation Step' in app,'Production range GUI controls missing')
+    check('DERIVED_RULE_FAIL' in app,'CAM deterministic range FAIL path missing')
+
+    print('[INTEGRATION_GATE][PASS] form-driven completeness, scope/notch, barcode/QR, manual review, S/N range, MAC range/allocation-step')
     return 0
 
 
