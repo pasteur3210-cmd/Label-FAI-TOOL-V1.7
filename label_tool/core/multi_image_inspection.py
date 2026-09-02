@@ -88,6 +88,75 @@ RAW_FIELD_KEYS = [
 ]
 
 IDENTITY_REVIEW_ITEM = "Identity: Cross-Image Consistency"
+NOTCH_ITEM = "Geometry: Label Notch Direction"
+
+
+def detect_label_notch_direction(image) -> tuple[str,float,str]:
+    """Best-effort cut-corner orientation detector for CMP-008.
+
+    It deliberately returns UNKNOWN when the outer label mask is not reliable;
+    Manual Review remains the safety path.  On a clear full-label image it
+    compares corner occupancy of the largest bright label-like contour.
+    """
+    if image is None or getattr(image,'size',0)==0:
+        return 'UNKNOWN',0.0,'image unavailable'
+    try:
+        gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY) if len(image.shape)==3 else image.copy()
+        h,w=gray.shape[:2]
+        if h<80 or w<120:
+            return 'UNKNOWN',0.0,'image too small'
+        blur=cv2.GaussianBlur(gray,(5,5),0)
+        # Otsu bright-region segmentation; morphological closing stabilizes
+        # printed text/barcode holes inside the white sticker.
+        _thr,mask=cv2.threshold(blur,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+        kernel=cv2.getStructuringElement(cv2.MORPH_RECT,(11,11))
+        mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,kernel,iterations=2)
+        contours,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        candidates=[]
+        img_area=float(h*w)
+        for c in contours:
+            area=float(cv2.contourArea(c))
+            if area < img_area*0.08: continue
+            x,y,cw,ch=cv2.boundingRect(c)
+            if cw < w*0.30 or ch < h*0.20: continue
+            aspect=cw/max(1.0,ch)
+            if not 1.05 <= aspect <= 5.5: continue
+            extent=area/max(1.0,float(cw*ch))
+            if extent<0.68: continue
+            # Avoid selecting the entire frame/background.
+            frame_touch=sum([x<=2,y<=2,x+cw>=w-2,y+ch>=h-2])
+            score=area*(1.0-0.15*frame_touch)
+            candidates.append((score,c,(x,y,cw,ch),extent))
+        if not candidates:
+            return 'UNKNOWN',0.0,'no stable label contour'
+        _score,c,(x,y,cw,ch),extent=max(candidates,key=lambda z:z[0])
+        cmask=np.zeros((h,w),dtype=np.uint8)
+        cv2.drawContours(cmask,[c],-1,255,thickness=-1)
+        patch=max(12,int(min(cw,ch)*0.12))
+        inset=max(2,int(patch*0.12))
+        coords={
+            'TOP_LEFT':(x+inset,y+inset),
+            'TOP_RIGHT':(x+cw-patch-inset,y+inset),
+            'BOTTOM_LEFT':(x+inset,y+ch-patch-inset),
+            'BOTTOM_RIGHT':(x+cw-patch-inset,y+ch-patch-inset),
+        }
+        occ={}
+        for key,(px,py) in coords.items():
+            px=max(0,min(w-patch,px)); py=max(0,min(h-patch,py))
+            roi=cmask[py:py+patch,px:px+patch]
+            occ[key]=float(np.count_nonzero(roi))/max(1.0,float(roi.size))
+        ordered=sorted(occ.items(),key=lambda kv:kv[1])
+        lowest_key,lowest=ordered[0]
+        other=np.median([v for k,v in ordered[1:]])
+        delta=float(other-lowest)
+        confidence=max(0.0,min(1.0,delta*3.2 + max(0.0,extent-0.6)*0.35))
+        # Rounded corners often make all four occupancies similar. Require a
+        # meaningful asymmetric deficit before claiming a notch direction.
+        if delta < 0.10 or confidence < 0.42:
+            return 'UNKNOWN',confidence,f'corner occupancy inconclusive {occ}'
+        return lowest_key,confidence,f'corner occupancy={occ}; extent={extent:.3f}'
+    except Exception as exc:
+        return 'UNKNOWN',0.0,f'notch detector error: {exc!r}'
 
 
 @dataclass
@@ -783,6 +852,28 @@ class MultiImageInspectionEngine:
                         "quality": qscore,
                         "threshold": d.threshold,
                     }
+
+        # CMP-008: Label notch/cut-corner direction.  The Golden Request Form
+        # defines the expected corner (e.g. TOP_LEFT). Automatic detection is
+        # intentionally conservative; uncertain images stay NEED_MORE_IMAGE and
+        # are always eligible for Manual Review.
+        if role == "FULL" and NOTCH_ITEM in self._required_items():
+            expected_notch=str((self.profile.get("rules",{}) or {}).get("notch_direction","") or "").upper()
+            actual_notch,notch_conf,notch_msg=detect_label_notch_direction(image)
+            if expected_notch:
+                if actual_notch == 'UNKNOWN':
+                    nr=FieldResult(name=NOTCH_ITEM,actual='',expected=expected_notch,status='WARN',
+                                   message=f'Notch direction needs manual review; confidence={notch_conf:.3f}; {notch_msg}',
+                                   error_code='GEO-NOTCH-VERIFY')
+                elif actual_notch == expected_notch and notch_conf >= 0.42:
+                    nr=FieldResult(name=NOTCH_ITEM,actual=actual_notch,expected=expected_notch,status='PASS',
+                                   message=f'Label notch direction matched; confidence={notch_conf:.3f}; {notch_msg}',
+                                   error_code='')
+                else:
+                    nr=FieldResult(name=NOTCH_ITEM,actual=actual_notch,expected=expected_notch,status='FAIL',
+                                   message=f'Label notch direction mismatch; confidence={notch_conf:.3f}; {notch_msg}',
+                                   error_code='GEO-NOTCH-DIR')
+                rows_by_name[NOTCH_ITEM]=nr
 
         observations = []
         for row in rows_by_name.values():

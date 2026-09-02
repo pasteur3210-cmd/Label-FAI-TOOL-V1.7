@@ -386,7 +386,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.17'
+                working['profile_version']='1.9.19'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -580,7 +580,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.17 Form-driven Golden + deterministic item reference + operator-attention workflow: every non-PASS item is reviewable; Legacy CAM/Image auto decisions remain protected.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.19 Scope-filter + Notch-direction alignment: shipped Chassis Label scope only; Password/WiFi Key remain length-only; all non-PASS items remain reviewable.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -637,7 +637,7 @@ class App(tk.Tk):
         name=self.profile_var.get()
         if not name or name not in self.profiles:return
         path,data=self.profiles[name]
-        # V1.9.17 compatibility migration: external Dynamic Profiles survive EXE
+        # V1.9.18 compatibility migration: external Dynamic Profiles survive EXE
         # upgrades. Clean stale V1.9.13-era generated Golden Text and rebuild
         # runtime requirements from numbered Request-Form rows before engines
         # are created. This prevents old password/support text from reappearing
@@ -2073,7 +2073,7 @@ class App(tk.Tk):
     def _golden_form_row_for_item(self, item: str) -> dict | None:
         """Resolve inspection item -> numbered Request-Form row deterministically.
 
-        V1.9.17 rule: once a numbered Golden exists, the item/reference binding
+        V1.9.18 rule: once a numbered Golden exists, the item/reference binding
         is an ID relationship, never a fuzzy/similarity lookup. Compatibility
         keyword fallback is allowed only for old non-numbered Profiles.
         """
@@ -2092,7 +2092,7 @@ class App(tk.Tk):
                 if item==str(r.get('item','')) or item==str(r.get('presence_item','')) or item in [str(x) for x in (r.get('engine_items',[]) or [])]:
                     return r
             # Numbered Request Form exists => allow only deterministic
-            # semantic aliases for stale pre-V1.9.17 item names. Never use
+            # semantic aliases for stale pre-V1.9.18 item names. Never use
             # similarity/fuzzy matching across numbered rows.
             if any(isinstance(r,dict) and r.get('form_no') is not None for r in rows):
                 up=str(item or '').upper()
@@ -2159,7 +2159,7 @@ class App(tk.Tk):
     def _golden_review_image_path(self) -> str:
         """Return the final printed Label Example, never a support screenshot.
 
-        V1.9.17 re-ranks the imported images at review time as a compatibility
+        V1.9.18 re-ranks the imported images at review time as a compatibility
         guard for Profiles imported by older versions whose candidate image was
         chosen by file size.  The scorer rewards label anchors/machine codes and
         penalises prose-heavy password/procedure screenshots.
@@ -2317,10 +2317,117 @@ class App(tk.Tk):
             return [exp]
         return []
 
+    def _golden_review_field_key(self, item: str, row: dict | None=None) -> str:
+        """Return the semantic field used only for Golden-review navigation.
+
+        This prevents a GPON review from taking the first generic barcode (often
+        S/N) and prevents consistency items from inventing a new ROI.  The key is
+        deterministic from the inspection item / bound Request-Form row.
+        """
+        text=' '.join(str(x) for x in (item,(row or {}).get('item',''),(row or {}).get('raw_text',''),(row or {}).get('machine_code_field','')) if x).upper()
+        if 'GPON S/N' in text or 'GPON SN' in text or 'GPON_SN' in text:
+            return 'gpon_sn'
+        if 'MAC' in text:
+            return 'mac'
+        if re.search(r'(^|[^A-Z])S/N([^A-Z]|$)',text) or 'SERIAL' in text or str((row or {}).get('machine_code_field','')).lower()=='sn':
+            return 'sn'
+        if 'QR' in text:
+            return 'qr'
+        return 'barcode'
+
+    def _golden_review_machine_code_box(self, item: str, row: dict | None, path: str, gi: dict, actual: str=''):
+        """Locate the *correct field* machine code on the Final Label.
+
+        Selection order is semantic payload -> exact actual value -> nearest
+        field label.  It never falls back to the first barcode, which caused
+        GPON S/N review to highlight the S/N barcode in earlier builds.
+        """
+        if not path:
+            return None, 'Machine-code location unavailable'
+        field=self._golden_review_field_key(item,row)
+        want_kind='QR' if field=='qr' else 'BARCODE'
+        codes=[]
+        for c in (gi.get('machine_codes',[]) or []):
+            if str(c.get('kind','')).upper()!=want_kind:
+                continue
+            cpath=str(c.get('file','') or '')
+            try:
+                same=(not cpath) or pathlib.Path(cpath).resolve()==pathlib.Path(path).resolve()
+            except Exception:
+                same=(not cpath) or os.path.basename(cpath)==os.path.basename(path)
+            if same:
+                codes.append(c)
+        if not codes:
+            return None, f'{want_kind} location not found on Final Label'
+
+        def compact(v):
+            return re.sub(r'[^A-Z0-9]','',str(v or '').upper())
+        act=compact(actual)
+        expected=compact((row or {}).get('expected',''))
+        scored=[]
+        for idx,c in enumerate(codes):
+            txt=compact(c.get('text',''))
+            score=0.0
+            # Strong semantic payload rules.
+            if field=='gpon_sn':
+                if txt.startswith('434D5444') and len(txt)>=16: score+=10.0
+                if '434D5444' in expected and txt.startswith('434D5444'): score+=4.0
+            elif field=='mac':
+                if re.fullmatch(r'[0-9A-F]{12}',txt): score+=10.0
+            elif field=='sn':
+                if txt and not re.fullmatch(r'[0-9A-F]{12,16}',txt): score+=7.0
+                if '4297' in txt or '4366' in txt or '8043' in txt: score+=4.0
+            elif field=='qr':
+                score+=10.0
+            if act and txt and (txt==act or txt in act or act in txt): score+=12.0
+            scored.append([score,idx,c])
+
+        # If semantic payload is decisive, use it.
+        scored.sort(key=lambda x:(x[0],-x[1]),reverse=True)
+        best=scored[0]
+        if best[0] < 5.0 and field in ('sn','mac','gpon_sn'):
+            # Geometry fallback: associate barcode with the nearest matching
+            # OCR field label on the same Final Label. This is navigation only.
+            anchors={'sn':['S/N'],'mac':['MAC'],'gpon_sn':['GPON S/N','GPON SN']}[field]
+            label_boxes=[]
+            for ocr in gi.get('image_ocr_results',[]) or []:
+                opath=str(ocr.get('file','') or '')
+                try: same=bool(opath) and pathlib.Path(opath).resolve()==pathlib.Path(path).resolve()
+                except Exception: same=bool(opath) and os.path.basename(opath)==os.path.basename(path)
+                if not same: continue
+                for line in ocr.get('lines',[]) or []:
+                    t=str(line.get('text','') or '').upper()
+                    if not any(a in t for a in anchors): continue
+                    pts=line.get('box',[]) or []
+                    if len(pts)>=2:
+                        xs=[float(q[0]) for q in pts]; ys=[float(q[1]) for q in pts]
+                        label_boxes.append(((min(xs)+max(xs))/2,(min(ys)+max(ys))/2))
+            if label_boxes:
+                for rec in scored:
+                    pts=rec[2].get('points',[]) or []
+                    if len(pts)<2: continue
+                    xs=[float(q[0]) for q in pts]; ys=[float(q[1]) for q in pts]
+                    cx=(min(xs)+max(xs))/2; cy=(min(ys)+max(ys))/2
+                    dist=min(abs(cx-lx)*0.35 + abs(cy-ly) for lx,ly in label_boxes)
+                    rec[0]+=max(0.0,5.0-dist/80.0)
+                scored.sort(key=lambda x:(x[0],-x[1]),reverse=True)
+                best=scored[0]
+        c=best[2]; pts=c.get('points',[]) or []
+        if len(pts)>=2:
+            xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
+            try:
+                with Image.open(path) as im:
+                    padx=max(12,int((max(xs)-min(xs))*0.08)); pady=max(10,int((max(ys)-min(ys))*0.18))
+                    box=(max(0,int(min(xs))-padx),max(0,int(min(ys))-pady),min(im.width,int(max(xs))+padx),min(im.height,int(max(ys))+pady))
+                return box, f'{field.upper()} {want_kind} location on Final Label'
+            except Exception:
+                pass
+        return None, f'{field.upper()} {want_kind} geometry unavailable'
+
     def _golden_review_region(self, item: str):
         """Return (final_label_path, focus_box, description) for selected item.
 
-        V1.9.17 safety boundary:
+        V1.9.18 safety boundary:
         * visual reference is always the FINAL Label Example;
         * item explanation comes from the controlled Request-Form row;
         * Focus Item may search only OCR/code geometry belonging to that final
@@ -2355,35 +2462,16 @@ class App(tk.Tk):
                 return path,marker,note
 
             explicit_text=str(item).startswith('Golden Text:') or str(item).startswith('Golden #') and typ in ('Golden Text','Golden Choice')
-            if (not explicit_text) and (typ in ('Golden QR','Golden Barcode') or 'QR' in item.upper() or 'BARCODE' in item.upper()):
-                want='QR' if (typ=='Golden QR' or 'QR' in item.upper()) else 'BARCODE'
-                # Restrict code geometry to the selected FINAL Label image.
-                codes=[]
-                for c in (gi.get('machine_codes',[]) or []):
-                    if str(c.get('kind','')).upper()!=want:
-                        continue
-                    cpath=str(c.get('file','') or '')
-                    try:
-                        if path and cpath and pathlib.Path(cpath).resolve()!=pathlib.Path(path).resolve():
-                            continue
-                    except Exception:
-                        if path and cpath and os.path.basename(cpath)!=os.path.basename(path):
-                            continue
-                    codes.append(c)
-                if actual:
-                    exact=[c for c in codes if str(c.get('text','')) and (str(c.get('text','')) in actual or actual in str(c.get('text','')))]
-                    if exact: codes=exact
-                if codes:
-                    c=codes[0]; pts=c.get('points',[]) or []
-                    if len(pts)>=2 and path:
-                        xs=[float(pt[0]) for pt in pts]; ys=[float(pt[1]) for pt in pts]
-                        try:
-                            with Image.open(path) as im:
-                                pad=max(20,int(min(im.size)*0.03))
-                                box=(max(0,int(min(xs))-pad),max(0,int(min(ys))-pad),min(im.width,int(max(xs))+pad),min(im.height,int(max(ys))+pad))
-                            return path,box,f'{want} ROI on Final Label'
-                        except Exception:
-                            pass
+            is_machine_review=((not explicit_text) and (typ in ('Golden QR','Golden Barcode') or 'QR' in item.upper() or 'BARCODE' in item.upper()))
+            # Standard/consistency machine-code checks must use the same field
+            # locator as their Golden machine-code counterpart.
+            up_item=str(item or '').upper()
+            if ('BARCODE' in up_item or 'TEXT VS BARCODE' in up_item or 'QR' in up_item) and any(k in up_item for k in ('S/N','MAC','GPON')):
+                is_machine_review=True
+            if is_machine_review:
+                box,note=self._golden_review_machine_code_box(item,row,path,gi,actual)
+                if box:
+                    return path,box,note
 
             # Text/field focus: use short field anchors and only OCR lines from
             # the FINAL Label image. Never compare the whole explanatory prose.
@@ -2431,7 +2519,7 @@ class App(tk.Tk):
     def _show_manual_golden_review(self, items: list[str], note: str):
         """Golden-assisted review for one non-PASS item.
 
-        V1.9.17 UI safety rules:
+        V1.9.18 UI safety rules:
         - Action buttons are placed above the image comparison area, so the
           Windows taskbar can never cover the only decision controls.
         - The popup size is calculated from the current screen instead of a
@@ -2482,7 +2570,7 @@ class App(tk.Tk):
         if mode=='REVIEW_ONLY':
             ttk.Label(top,text='此項可人工確認；Automatic Result 會保留於報告與 Log，不會被人工結果覆蓋。',foreground='#8A5A00').pack(anchor='w',pady=(3,0))
 
-        # V1.9.17: keep the decision bar permanently visible ABOVE the images.
+        # V1.9.18: keep the decision bar permanently visible ABOVE the images.
         actions=ttk.Frame(win,padding=(8,4)); actions.pack(fill='x')
         ttk.Label(actions,text=f'Note: {note}',foreground='#444').pack(side='left',padx=(0,8))
 
@@ -2541,12 +2629,12 @@ class App(tk.Tk):
                 ttk.Label(parent,text=f'Cannot open image: {exc}').pack(fill='both',expand=True)
         put_image(left,actual_path,'No evidence image is available for this item.',caption=os.path.basename(actual_path) if actual_path else '')
 
-        # V1.9.17: the operator always starts from the COMPLETE Golden label.
+        # V1.9.18: the operator always starts from the COMPLETE Golden label.
         # A typed/verified focus crop is an optional aid, never the only
         # reference. This prevents an incorrect ROI mapping from misleading a
         # factory manual decision.
         golden_controls=ttk.Frame(right); golden_controls.pack(fill='x',pady=(0,4))
-        # V1.9.17: show the controlled Request-Form explanation separately from
+        # V1.9.18: show the controlled Request-Form explanation separately from
         # the Final Label visual. This prevents support screenshots (password
         # proposals, process notes, etc.) from being mistaken for the Golden
         # reference of MAC/Made-in/other fields.
@@ -2571,20 +2659,42 @@ class App(tk.Tk):
                 else:
                     view_state.set('Full Golden / 完整Golden')
                     if highlight_box:
+                        # V1.9.18 factory-review locator: use a callout arrow as
+                        # the PRIMARY cue. A slightly inaccurate ROI no longer
+                        # draws a large authoritative rectangle around the wrong
+                        # content. The arrow points to the ROI centre and small
+                        # corner ticks only indicate the approximate target area.
                         draw=ImageDraw.Draw(im)
                         x1,y1,x2,y2=[int(v) for v in highlight_box]
-                        line_w=max(4,int(min(im.size)*0.006))
-                        for off in range(line_w):
-                            draw.rectangle((max(0,x1-off),max(0,y1-off),min(im.width-1,x2+off),min(im.height-1,y2+off)),outline=(220,35,35))
+                        x1=max(0,min(im.width-1,x1)); x2=max(0,min(im.width-1,x2))
+                        y1=max(0,min(im.height-1,y1)); y2=max(0,min(im.height-1,y2))
+                        cx=max(0,min(im.width-1,(x1+x2)//2)); cy=max(0,min(im.height-1,(y1+y2)//2))
                         label=f'REVIEW: {item}'
-                        tx=max(2,x1); ty=max(2,y1-24)
-                        # High-contrast tag; default PIL font avoids external font dependencies.
+                        # Put the callout on the side with more free space.
+                        tag_x=8 if cx>im.width*0.45 else max(8,int(im.width*0.58))
+                        tag_y=max(8,min(im.height-30,cy-42))
                         try:
-                            bbox=draw.textbbox((tx,ty),label)
-                            draw.rectangle((bbox[0]-3,bbox[1]-2,bbox[2]+3,bbox[3]+2),fill=(255,255,255))
+                            bbox=draw.textbbox((tag_x,tag_y),label)
+                            draw.rectangle((bbox[0]-5,bbox[1]-3,bbox[2]+5,bbox[3]+3),fill=(255,255,255),outline=(220,35,35),width=2)
                         except Exception:
                             pass
-                        draw.text((tx,ty),label,fill=(220,35,35))
+                        draw.text((tag_x,tag_y),label,fill=(220,35,35))
+                        # Arrow shaft + triangular head.
+                        sx=tag_x+8; sy=tag_y+18
+                        draw.line((sx,sy,cx,cy),fill=(220,35,35),width=max(3,int(min(im.size)*0.004)))
+                        import math as _math
+                        ang=_math.atan2(cy-sy,cx-sx); ah=max(10,int(min(im.size)*0.014))
+                        p1=(cx-int(ah*_math.cos(ang-0.55)),cy-int(ah*_math.sin(ang-0.55)))
+                        p2=(cx-int(ah*_math.cos(ang+0.55)),cy-int(ah*_math.sin(ang+0.55)))
+                        draw.polygon([(cx,cy),p1,p2],fill=(220,35,35))
+                        r=max(5,int(min(im.size)*0.007))
+                        draw.ellipse((cx-r,cy-r,cx+r,cy+r),outline=(220,35,35),width=3)
+                        # Small corner ticks are deliberately non-authoritative.
+                        tick=max(8,int(min(max(1,x2-x1),max(1,y2-y1))*0.20))
+                        lw=max(2,int(min(im.size)*0.003))
+                        for ax,ay,dx,dy in ((x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)):
+                            draw.line((ax,ay,ax+dx*tick,ay),fill=(220,35,35),width=lw)
+                            draw.line((ax,ay,ax,ay+dy*tick),fill=(220,35,35),width=lw)
                 im.thumbnail((max_img_w,max_img_h),Image.Resampling.LANCZOS)
                 ph=ImageTk.PhotoImage(im); photos.append(ph)
                 ttk.Label(golden_view,image=ph,anchor='center').pack(fill='both',expand=True)
@@ -2729,7 +2839,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.17 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.19 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

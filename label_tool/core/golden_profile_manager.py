@@ -495,6 +495,139 @@ def _form_label(no: int, text: str) -> str:
     return (head or f'Item {no}')[:72]
 
 
+
+def _scope_reference_only_text(body: str) -> bool:
+    """Return True for request-form entries that are process/reference notes, not shipped-label content."""
+    low=' '.join(str(body or '').replace('：',':').split()).lower()
+    refs=(
+        '匯入列印方式', '列印方式參考', 'print method', 'printing method',
+        '以上所有密碼規則說明', 'password proposal', 'rules explanation',
+    )
+    return any(x in low for x in refs)
+
+
+def _extract_notch_direction(text: str) -> tuple[str,str]:
+    """Extract label-notch orientation from the controlled Request Form text.
+
+    The form often states this beside the final Label Example, e.g.
+    "印出後貼紙缺角處在左上角".  This is a shipped-label geometry requirement,
+    even though it is not a numbered item.
+    """
+    t=' '.join(str(text or '').replace('：',':').split())
+    patterns=(
+        ('TOP_LEFT', r'(?:缺角|切角)[^。；;\n]{0,30}(?:左上角|左上|top[ -]?left|upper[ -]?left)'),
+        ('TOP_RIGHT', r'(?:缺角|切角)[^。；;\n]{0,30}(?:右上角|右上|top[ -]?right|upper[ -]?right)'),
+        ('BOTTOM_LEFT', r'(?:缺角|切角)[^。；;\n]{0,30}(?:左下角|左下|bottom[ -]?left|lower[ -]?left)'),
+        ('BOTTOM_RIGHT', r'(?:缺角|切角)[^。；;\n]{0,30}(?:右下角|右下|bottom[ -]?right|lower[ -]?right)'),
+    )
+    for key,pat in patterns:
+        m=re.search(pat,t,re.I)
+        if m:
+            return key,m.group(0)
+    return '',''
+
+
+def _final_label_scope_y(final_label: Path|None, image_ocr_rows: list[dict]) -> tuple[float,float,float]:
+    """Infer the dense shipped-label vertical band from Final Label OCR.
+
+    Returns (y0, y1, confidence).  It deliberately uses text clustering rather
+    than a model-specific hard-coded crop, so lower production/test blocks in a
+    request-form screenshot can be excluded while full-size label examples are
+    retained.
+    """
+    if not final_label:
+        return 0.0,1.0,0.0
+    name=final_label.name
+    row=next((r for r in (image_ocr_rows or []) if Path(str(r.get('file',''))).name==name),None)
+    if not row:
+        return 0.0,1.0,0.0
+    spans=[]
+    max_coord=0.0
+    for ln in row.get('lines',[]) or []:
+        pts=ln.get('box') or []
+        if len(pts)<2: continue
+        ys=[float(pt[1]) for pt in pts if len(pt)>=2]
+        if not ys: continue
+        y0,y1=min(ys),max(ys); yc=(y0+y1)/2.0
+        spans.append((yc,y0,y1))
+        max_coord=max(max_coord,y1)
+    if len(spans)<4 or max_coord<=0:
+        return 0.0,1.0,0.0
+    spans.sort()
+    gap=max(32.0,max_coord*0.35)
+    groups=[]; cur=[spans[0]]
+    for item in spans[1:]:
+        if item[0]-cur[-1][0] > gap:
+            groups.append(cur); cur=[item]
+        else:
+            cur.append(item)
+    groups.append(cur)
+    main=max(groups,key=lambda g:(len(g),sum(x[2]-x[1] for x in g)))
+    # If there is no dominant cluster, treat the whole OCR span as one label.
+    # This avoids splitting sparse but legitimate full-label layouts (e.g.
+    # GRG-4366) into two artificial zones. A real lower production/test block
+    # is typically a small separated tail while the main label remains dominant.
+    if len(main)/max(1,len(spans)) < 0.60:
+        main=spans
+    lo=min(x[1] for x in main); hi=max(x[2] for x in main)
+    margin=max(10.0,max_coord*0.04)
+    lo=max(0.0,lo-margin); hi=hi+margin
+    return lo/max_coord,min(1.0,hi/max_coord),min(1.0,len(main)/max(1,len(spans)))
+
+
+def _code_center_y(code: dict) -> float|None:
+    pts=code.get('points') or []
+    ys=[float(p[1]) for p in pts if isinstance(p,(list,tuple)) and len(p)>=2]
+    return (sum(ys)/len(ys)) if ys else None
+
+
+def _apply_chassis_scope_filter(form_items: list[dict], final_label: Path|None,
+                                image_ocr_rows: list[dict], machine_codes: list[dict]) -> dict:
+    """CMP-001: keep Request Form traceability but exclude non-shipped test/process zones.
+
+    Process/reference rows stay visible in Profile Manager with Required=False.
+    A "test programming" QR is excluded only when the Final Label screenshot
+    contains a QR outside the dense shipped-label band.  This preserves products
+    where the same test QR is physically printed inside the outgoing label.
+    """
+    scope={'policy':'CHASSIS_SHIPPED_LABEL_ONLY','excluded_items':[],'scope_y':[0.0,1.0],'confidence':0.0}
+    if final_label:
+        y0,y1,conf=_final_label_scope_y(final_label,image_ocr_rows)
+        scope['scope_y']=[round(y0,4),round(y1,4)]; scope['confidence']=round(conf,3)
+    else:
+        y0,y1,conf=0.0,1.0,0.0
+    final_name=final_label.name if final_label else ''
+    final_codes=[c for c in (machine_codes or []) if Path(str(c.get('file',''))).name==final_name]
+    outside_qr=False
+    if final_codes and conf>0:
+        # Normalize centers using the largest observed Y coordinate in points.
+        all_y=[float(p[1]) for c in final_codes for p in (c.get('points') or []) if len(p)>=2]
+        max_y=max(all_y) if all_y else 0.0
+        if max_y>0:
+            for c in final_codes:
+                if str(c.get('kind','')).upper()!='QR': continue
+                cy=_code_center_y(c)
+                if cy is not None and (cy/max_y > y1+0.03 or cy/max_y < max(0.0,y0-0.03)):
+                    outside_qr=True; break
+    for row in form_items:
+        raw=str(row.get('raw_text','') or '')
+        reason=''
+        if _scope_reference_only_text(raw):
+            reason='Process/reference instruction; not printed on shipped Chassis Label'
+        elif re.search(r'(?:測試刷入使用|test\s*(?:program|programming|flash))',raw,re.I) and outside_qr:
+            reason='Test-programming code is outside shipped-label scope in Final Label Example'
+        if reason:
+            row['inspection_scope']='REFERENCE_ONLY'
+            row['scope_reason']=reason
+            row['required']=False
+            row['review_status']='REFERENCE_ONLY'
+            row['engine_items']=[]
+            row['presence_item']=''
+            scope['excluded_items'].append({'form_no':row.get('form_no'),'item':row.get('item'),'reason':reason})
+        else:
+            row['inspection_scope']='CHASSIS_LABEL'
+    return scope
+
 def _classify_form_item(no: int, body: str) -> dict:
     t=' '.join(str(body or '').split())
     low=t.lower()
@@ -585,6 +718,7 @@ def _classify_form_item(no: int, body: str) -> dict:
         'presence_item':presence_item,'machine_code_field':field_key,
         'machine_code_rule_known':bool(rule_known),
         'manual_review_allowed':True,
+        'inspection_scope':'CHASSIS_LABEL',
         'review_status':'NEEDS_REVIEW' if (typ=='Needs Review' or (typ in ('Golden QR','Golden Barcode') and not rule_known)) else 'AUTO_CLASSIFIED',
     }
 
@@ -725,6 +859,10 @@ def _rules_from_golden_text(text: str) -> dict:
         for c in ('China','Taiwan'):
             if re.search(r'Made\s+in\s+'+c,t,re.I): countries.append(c)
     if countries: rules['made_in_allowed']=countries
+    notch,notch_text=_extract_notch_direction(text)
+    if notch:
+        rules['notch_direction']=notch
+        rules['notch_direction_source']=notch_text
     return rules
 
 def _standard_item_candidates(text: str) -> list[dict]:
@@ -958,7 +1096,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.17',
+        'profile_version':'1.9.19',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -991,14 +1129,32 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     # Needs Review instead of disappearing. Standard engine checks are mapped
     # behind the Golden row or added explicitly from Standard Library.
     form_items=extract_golden_form_items(source_text)
+    # V1.9.19 CMP-001: determine the actual shipped Chassis Label boundary from
+    # the structurally selected Final Label image, then retain process/test
+    # rows as Reference Only instead of runtime inspection requirements.
+    layout,layout_score,layout_reason=select_final_label_image(tx_images,image_ocr_rows,machine_codes,final_label_media_names)
+    scope_meta=_apply_chassis_scope_filter(form_items,layout,image_ocr_rows,machine_codes)
+    # CMP-008: the notch/cut-corner direction is stated beside Label Example,
+    # outside the numbered list. Add it as an explicit inspectable Golden item.
+    notch_dir,notch_text=_extract_notch_direction(source_text)
+    if notch_dir:
+        form_items.append({
+            'form_no':None,'item':'Golden Geometry: Label Notch Direction','type':'Golden Geometry','role':'FULL',
+            'required':True,'selected':'TEXT_DEFINED','expected':notch_dir,'raw_text':notch_text,
+            'origin':'GOLDEN','source':'Golden','engine_items':['Geometry: Label Notch Direction'],
+            'presence_item':'','machine_code_field':'','machine_code_rule_known':True,
+            'manual_review_allowed':True,'inspection_scope':'CHASSIS_LABEL','review_status':'AUTO_CLASSIFIED',
+        })
     # Hard non-bypass rule: a machine code visible in the Golden example must
     # exist as a Profile inspection item even when the prose does not define
     # its payload/format. Add visual-only entries only when the numbered form
     # does not already cover that code type/count.
     qr_existing=sum(1 for r in form_items if r.get('type')=='Golden QR')
     bc_existing=sum(1 for r in form_items if r.get('type')=='Golden Barcode')
-    qr_seen=[c for c in machine_codes if c.get('kind')=='QR']
-    bc_seen=[c for c in machine_codes if c.get('kind')=='BARCODE']
+    layout_name=layout.name if layout else ''
+    scoped_codes=[c for c in machine_codes if (not layout_name or Path(str(c.get('file',''))).name==layout_name)]
+    qr_seen=[c for c in scoped_codes if c.get('kind')=='QR']
+    bc_seen=[c for c in scoped_codes if c.get('kind')=='BARCODE']
     for idx,c in enumerate(qr_seen[qr_existing:],1):
         item=f'Golden Visual QR #{qr_existing+idx}'
         form_items.append({'form_no':None,'item':item,'type':'Golden QR','role':'DETAIL','required':True,
@@ -1029,7 +1185,8 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     profile['dynamic_standard_items']=[]
     profile=apply_editable_items(profile,rows)
     profile['golden_item_bindings']=_build_golden_item_bindings(profile)
-    profile['runtime_form_driven_version']='1.9.17'
+    profile['runtime_form_driven_version']='1.9.19'
+    profile['golden_scope']=scope_meta
     profile['golden_completeness']={
         'document_item_count':len(form_items),
         'profile_item_count':len(profile.get('golden_form_items',[]) or []),
@@ -1057,7 +1214,6 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
         'action':'AUTO_GOLDEN_IMPORT','item_count':len(rows),
         'document_item_count':len(form_items),
     }]
-    layout,layout_score,layout_reason=select_final_label_image(tx_images,image_ocr_rows,machine_codes,final_label_media_names)
     if layout:
         try:
             rel=layout.relative_to(tx_root)
@@ -1132,23 +1288,54 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
     """
     if not profile.get('dynamic_profile') or not (profile.get('golden_form_items') or []):
         return profile,False,[]
-    if str(profile.get('runtime_form_driven_version',''))=='1.9.17' and profile.get('golden_item_bindings'):
+    if str(profile.get('runtime_form_driven_version',''))=='1.9.19' and profile.get('golden_item_bindings'):
         return profile,False,[]
     before=deepcopy(profile)
     rows=_dynamic_item_rows(profile)
+    # V1.9.19 migration: retrofit CMP-001 scope and CMP-008 notch to existing
+    # external profiles so operators do not have to re-import every Golden.
+    gi=profile.get('golden_import',{}) or {}
+    full_text=''
+    try:
+        txt_path=Path(str(gi.get('extracted_text_file','') or ''))
+        if txt_path.exists(): full_text=txt_path.read_text(encoding='utf-8',errors='ignore')
+    except Exception:
+        full_text=''
+    if not full_text:
+        full_text='\n'.join(str(r.get('raw_text','')) for r in rows if isinstance(r,dict))
+    layout_path=None
+    try:
+        lp=Path(str(gi.get('final_label_image') or gi.get('candidate_layout_image') or ''))
+        if lp.exists(): layout_path=lp
+    except Exception:
+        layout_path=None
+    scope_meta=_apply_chassis_scope_filter(rows,layout_path,list(gi.get('image_ocr_results',[]) or []),list(gi.get('machine_codes',[]) or []))
+    notch_dir,notch_text=_extract_notch_direction(full_text)
+    if notch_dir and not any(str(r.get('item',''))=='Golden Geometry: Label Notch Direction' for r in rows if isinstance(r,dict)):
+        rows.append({
+            'form_no':None,'item':'Golden Geometry: Label Notch Direction','type':'Golden Geometry','role':'FULL',
+            'required':True,'selected':'TEXT_DEFINED','expected':notch_dir,'raw_text':notch_text,
+            'origin':'GOLDEN','source':'Golden','engine_items':['Geometry: Label Notch Direction'],
+            'presence_item':'','machine_code_field':'','machine_code_rule_known':True,
+            'manual_review_allowed':True,'inspection_scope':'CHASSIS_LABEL','review_status':'AUTO_CLASSIFIED',
+        })
     cleaned=apply_editable_items(profile,rows)
-    cleaned['profile_version']='1.9.17'
-    cleaned['runtime_form_driven_version']='1.9.17'
+    cleaned['golden_scope']=scope_meta
+    cleaned['profile_version']='1.9.19'
+    cleaned['runtime_form_driven_version']='1.9.19'
     cleaned['golden_item_bindings']=_build_golden_item_bindings(cleaned)
     # Runtime-rule migration for already-imported external profiles.  V1.9.16
     # could persist password_length=0 because Password: Random N characters was
     # not extracted.  Re-derive safe form rules and only fill missing/invalid
     # values so engineer-edited valid rules are preserved.
     form_text='\n'.join(str(r.get('raw_text','')) for r in (cleaned.get('golden_form_items',[]) or []) if isinstance(r,dict))
-    derived_rules=_rules_from_golden_text(form_text)
+    derived_rules=_rules_from_golden_text(full_text or form_text)
     current_rules=cleaned.setdefault('rules',{})
     if int(current_rules.get('password_length',0) or 0) <= 0 and int(derived_rules.get('password_length',0) or 0) > 0:
         current_rules['password_length']=int(derived_rules['password_length'])
+    if derived_rules.get('notch_direction'):
+        current_rules['notch_direction']=derived_rules['notch_direction']
+        current_rules['notch_direction_source']=derived_rules.get('notch_direction_source','')
     # Migration is a controlled engine update, not an operator edit. Preserve
     # a previously VALIDATED status only if every required item still has a
     # handling path under the new rules; otherwise DRAFT is safer.
@@ -1265,7 +1452,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.17'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.19'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})
