@@ -1016,15 +1016,19 @@ class MultiImageInspectionEngine:
         return "_".join(x for x in parts if x)
 
     def _sync_named_records(self, result: MultiImageResult) -> None:
-        """Create human-readable aliases while preserving canonical internal filenames."""
+        """Create short, readable aliases inside an already traceable session folder.
+
+        V1.9.22 deliberately avoids repeating Model/Label/P-N/timestamp/session-id
+        in every file name. The session directory itself is the traceability key;
+        short inner names prevent Windows/PyInstaller path-length failures.
+        """
         session_dir=Path(result.session_dir)
-        prefix=self._record_prefix()
         aliases={
-            "execution.log":f"{prefix}_Execution_Log_{result.session_id}.log",
-            "test.log":f"{prefix}_Test_Log_{result.session_id}.log",
-            "debug.log":f"{prefix}_Debug_Log_{result.session_id}.log",
-            "performance.log":f"{prefix}_Performance_Log_{result.session_id}.log",
-            "result.json":f"{prefix}_Result_{result.session_id}.json",
+            "execution.log":"Execution_Log.log",
+            "test.log":"Test_Log.log",
+            "debug.log":"Debug_Log.log",
+            "performance.log":"Performance_Log.log",
+            "result.json":"Result.json",
         }
         for src_name,dst_name in aliases.items():
             src=session_dir/src_name
@@ -1310,7 +1314,7 @@ class MultiImageInspectionEngine:
         }
 
     def _write_excel(self, result: MultiImageResult, expected: dict):
-        p = Path(result.session_dir) / f"{self._record_prefix()}_Image_Inspection_Report_{result.session_id}.xlsx"
+        p = Path(result.session_dir) / "Inspection_Report.xlsx"
         wb = xlsxwriter.Workbook(str(p))
         h = wb.add_format({"bold": True, "bg_color": "#4472C4", "font_color": "#FFFFFF", "border": 1})
         c = wb.add_format({"border": 1, "text_wrap": True, "valign": "top"})
