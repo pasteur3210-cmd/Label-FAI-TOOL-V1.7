@@ -114,6 +114,14 @@ class App(tk.Tk):
         self.image_manual_note_var = tk.StringVar(value="Visual inspection confirmed")
         self.expected_pn = tk.StringVar()
         self.expected_country = tk.StringVar()
+        self.expected_sn_start = tk.StringVar()
+        self.expected_sn_end = tk.StringVar()
+        self.expected_sn_range_enabled = tk.BooleanVar(value=False)
+        self.expected_mac_start = tk.StringVar()
+        self.expected_mac_end = tk.StringVar()
+        self.expected_mac_step = tk.StringVar()
+        self.expected_mac_range_enabled = tk.BooleanVar(value=False)
+        self.expected_mac_step_enabled = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Ready")
         self.camera_var = tk.StringVar()
         self.live_state_var = tk.StringVar(value="Live: STOPPED")
@@ -475,7 +483,24 @@ class App(tk.Tk):
         ttk.Label(wo,text="P/N").grid(row=0,column=0,sticky="w")
         ttk.Entry(wo,textvariable=self.expected_pn,width=22).grid(row=0,column=1,padx=(5,20))
         ttk.Label(wo,text="Made in").grid(row=0,column=2,sticky="w")
-        ttk.Combobox(wo,textvariable=self.expected_country,width=16,values=["","China","Taiwan"]).grid(row=0,column=3,padx=5)
+        ttk.Combobox(wo,textvariable=self.expected_country,width=16,values=["","China","Taiwan"]).grid(row=0,column=3,padx=5,sticky="w")
+
+        ttk.Label(wo,text="S/N Start").grid(row=1,column=0,sticky="w",pady=(7,0))
+        ttk.Entry(wo,textvariable=self.expected_sn_start,width=25).grid(row=1,column=1,padx=(5,12),pady=(7,0),sticky="w")
+        ttk.Label(wo,text="S/N End").grid(row=1,column=2,sticky="w",pady=(7,0))
+        ttk.Entry(wo,textvariable=self.expected_sn_end,width=25).grid(row=1,column=3,padx=(5,12),pady=(7,0),sticky="w")
+        ttk.Checkbutton(wo,text="Check S/N Range",variable=self.expected_sn_range_enabled,command=self._on_production_data_change).grid(row=1,column=4,sticky="w",pady=(7,0))
+
+        ttk.Label(wo,text="MAC Start").grid(row=2,column=0,sticky="w",pady=(7,0))
+        ttk.Entry(wo,textvariable=self.expected_mac_start,width=25).grid(row=2,column=1,padx=(5,12),pady=(7,0),sticky="w")
+        ttk.Label(wo,text="MAC End").grid(row=2,column=2,sticky="w",pady=(7,0))
+        ttk.Entry(wo,textvariable=self.expected_mac_end,width=25).grid(row=2,column=3,padx=(5,12),pady=(7,0),sticky="w")
+        ttk.Checkbutton(wo,text="Check MAC Range",variable=self.expected_mac_range_enabled,command=self._on_production_data_change).grid(row=2,column=4,sticky="w",pady=(7,0))
+
+        ttk.Label(wo,text="MAC Qty / Step").grid(row=3,column=0,sticky="w",pady=(7,0))
+        ttk.Entry(wo,textvariable=self.expected_mac_step,width=12).grid(row=3,column=1,padx=(5,12),pady=(7,0),sticky="w")
+        ttk.Checkbutton(wo,text="Check MAC Allocation Step",variable=self.expected_mac_step_enabled,command=self._on_production_data_change).grid(row=3,column=2,columnspan=2,sticky="w",pady=(7,0))
+        ttk.Label(wo,text="Example: 10 = each unit uses 10 MACs",foreground="#666666").grid(row=3,column=4,sticky="w",pady=(7,0))
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=4)
@@ -580,7 +605,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.19 Scope-filter + Notch-direction alignment: shipped Chassis Label scope only; Password/WiFi Key remain length-only; all non-PASS items remain reviewable.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.20 Production Range alignment: shipped-label scope + Notch retained; optional S/N range, MAC range and MAC allocation-step checks added; all non-PASS items remain reviewable.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -727,17 +752,39 @@ class App(tk.Tk):
         }
         return expected_snapshot, known_snapshot, target_snapshot
 
+    def _on_production_data_change(self):
+        # Changing a production allocation rule invalidates prior decisions just
+        # like changing P/N/Made-in. The next run must evaluate the new context.
+        try:
+            self._invalidate_image_result_after_profile_change(self.profile_var.get() or "Production Data")
+        except Exception:
+            pass
+        if getattr(self,'locks',None) is not None:
+            try:self._reset_live_tree()
+            except Exception:pass
+
     def _expected(self):
         d={}
         if self.expected_pn.get().strip():d['pn']=self.expected_pn.get().strip()
         if self.expected_country.get().strip():d['made_in']=self.expected_country.get().strip()
+        d['sn_range_enabled']=bool(self.expected_sn_range_enabled.get())
+        d['mac_range_enabled']=bool(self.expected_mac_range_enabled.get())
+        d['mac_step_enabled']=bool(self.expected_mac_step_enabled.get())
+        if self.expected_sn_start.get().strip():d['sn_start']=self.expected_sn_start.get().strip()
+        if self.expected_sn_end.get().strip():d['sn_end']=self.expected_sn_end.get().strip()
+        if self.expected_mac_start.get().strip():d['mac_start']=self.expected_mac_start.get().strip()
+        if self.expected_mac_end.get().strip():d['mac_end']=self.expected_mac_end.get().strip()
+        if self.expected_mac_step.get().strip():d['mac_step']=self.expected_mac_step.get().strip()
         return d
 
     def _effective_required_items(self):
         items=list(self.engine.profile.get('live',{}).get('required_items',[]))
         if self.expected_pn.get().strip(): items.append('Work Order: P/N')
         if self.expected_country.get().strip(): items.append('Work Order: Made in')
-        return items
+        if self.expected_sn_range_enabled.get(): items.append('Work Order: S/N Range')
+        if self.expected_mac_range_enabled.get(): items.append('Work Order: MAC Range')
+        if self.expected_mac_step_enabled.get(): items.append('Work Order: MAC Allocation Step')
+        return list(dict.fromkeys(items))
 
     def _reset_live_tree(self):
         if not hasattr(self,'live_tree') or self.locks is None:return
@@ -1876,6 +1923,9 @@ class App(tk.Tk):
             "Rule: GPON S/N = Prefix + MAC Last 8",
             "Consistency: QR SSID vs Printed SSID",
             "Consistency: QR Key vs Printed WiFi Key",
+            "Work Order: S/N Range",
+            "Work Order: MAC Range",
+            "Work Order: MAC Allocation Step",
         ]
         required=set(self.locks.required_items if self.locks else [])
         active=[name for name in candidates if name in required]
@@ -1900,6 +1950,23 @@ class App(tk.Tk):
                     self.live_session.execution.info(
                         "DERIVED_RULE_LOCKED item=%s actual=%s expected=%s",
                         row.name,row.actual,row.expected
+                    )
+            elif row.status=="FAIL":
+                # Production range/allocation failures must participate in the
+                # same SmartLock fail-confirmation path as camera rules. This
+                # prevents CAM from waiting forever on a deterministic range FAIL.
+                self.__dict__.setdefault("report_expected",{})[row.name]=row.expected
+                state=self.locks.offer(row.name,row.actual or row.expected,"FAIL",row.message,source="Derived Rule Engine")
+                if self.live_tree.exists(row.name):
+                    self.live_tree.item(
+                        row.name,
+                        values=(row.name,row.actual,row.expected,self.locks.status_text(row.name),row.message),
+                        tags=(state,)
+                    )
+                if self.live_session:
+                    self.live_session.execution.info(
+                        "DERIVED_RULE_FAIL item=%s actual=%s expected=%s state=%s message=%s",
+                        row.name,row.actual,row.expected,state,row.message
                     )
 
     def _update_live_overall(self,frame):
@@ -2839,7 +2906,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.19 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.20 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

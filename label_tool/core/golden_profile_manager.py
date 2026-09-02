@@ -1096,7 +1096,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.19',
+        'profile_version':'1.9.20',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -1129,7 +1129,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     # Needs Review instead of disappearing. Standard engine checks are mapped
     # behind the Golden row or added explicitly from Standard Library.
     form_items=extract_golden_form_items(source_text)
-    # V1.9.19 CMP-001: determine the actual shipped Chassis Label boundary from
+    # V1.9.20 CMP-001: determine the actual shipped Chassis Label boundary from
     # the structurally selected Final Label image, then retain process/test
     # rows as Reference Only instead of runtime inspection requirements.
     layout,layout_score,layout_reason=select_final_label_image(tx_images,image_ocr_rows,machine_codes,final_label_media_names)
@@ -1185,7 +1185,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     profile['dynamic_standard_items']=[]
     profile=apply_editable_items(profile,rows)
     profile['golden_item_bindings']=_build_golden_item_bindings(profile)
-    profile['runtime_form_driven_version']='1.9.19'
+    profile['runtime_form_driven_version']='1.9.20'
     profile['golden_scope']=scope_meta
     profile['golden_completeness']={
         'document_item_count':len(form_items),
@@ -1288,11 +1288,11 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
     """
     if not profile.get('dynamic_profile') or not (profile.get('golden_form_items') or []):
         return profile,False,[]
-    if str(profile.get('runtime_form_driven_version',''))=='1.9.19' and profile.get('golden_item_bindings'):
+    if str(profile.get('runtime_form_driven_version',''))=='1.9.20' and profile.get('golden_item_bindings'):
         return profile,False,[]
     before=deepcopy(profile)
     rows=_dynamic_item_rows(profile)
-    # V1.9.19 migration: retrofit CMP-001 scope and CMP-008 notch to existing
+    # V1.9.20 migration: retrofit CMP-001 scope and CMP-008 notch to existing
     # external profiles so operators do not have to re-import every Golden.
     gi=profile.get('golden_import',{}) or {}
     full_text=''
@@ -1321,8 +1321,8 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
         })
     cleaned=apply_editable_items(profile,rows)
     cleaned['golden_scope']=scope_meta
-    cleaned['profile_version']='1.9.19'
-    cleaned['runtime_form_driven_version']='1.9.19'
+    cleaned['profile_version']='1.9.20'
+    cleaned['runtime_form_driven_version']='1.9.20'
     cleaned['golden_item_bindings']=_build_golden_item_bindings(cleaned)
     # Runtime-rule migration for already-imported external profiles.  V1.9.16
     # could persist password_length=0 because Password: Random N characters was
@@ -1452,7 +1452,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.19'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.20'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})

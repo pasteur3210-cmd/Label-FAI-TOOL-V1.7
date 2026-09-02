@@ -40,6 +40,12 @@ def create_inspection_report(path, payload: dict):
         ("Locked / Required",f"{payload.get('locked_count','')} / {payload.get('required_count','')}"),
         ("Work Order P/N",payload.get("work_order",{}).get("pn","")),
         ("Made in",payload.get("work_order",{}).get("made_in","")),
+        ("S/N Range Enabled",payload.get("work_order",{}).get("sn_range_enabled",False)),
+        ("S/N Range",f"{payload.get('work_order',{}).get('sn_start','')} ~ {payload.get('work_order',{}).get('sn_end','')}"),
+        ("MAC Range Enabled",payload.get("work_order",{}).get("mac_range_enabled",False)),
+        ("MAC Range",f"{payload.get('work_order',{}).get('mac_start','')} ~ {payload.get('work_order',{}).get('mac_end','')}"),
+        ("MAC Allocation Step Enabled",payload.get("work_order",{}).get("mac_step_enabled",False)),
+        ("MAC Qty / Step",payload.get("work_order",{}).get("mac_step","")),
         ("Unfinished Items",", ".join(payload.get("unlocked_items",[]) or [])),
         ("Confirmed Fail Items",", ".join(payload.get("confirmed_fail_items",[]) or [])),
     ]

@@ -221,6 +221,7 @@ class MultiImageInspectionEngine:
         self.software_version = software_version
         self.base = InspectionEngine(profile)
         self.artwork = ArtworkPresenceDetector(profile)
+        self._active_expected = {}
 
     def set_profile(self, profile: dict):
         self.profile = profile
@@ -580,13 +581,20 @@ class MultiImageInspectionEngine:
 
     def _required_items(self):
         items = list(self.profile.get("live", {}).get("required_items", []) or [])
+        expected=dict(getattr(self,"_active_expected",{}) or {})
+        if expected.get("sn_range_enabled"):
+            items.append("Work Order: S/N Range")
+        if expected.get("mac_range_enabled"):
+            items.append("Work Order: MAC Range")
+        if expected.get("mac_step_enabled"):
+            items.append("Work Order: MAC Allocation Step")
         art = self.profile.get("artwork_verification", {}) or {}
         for s in art.get("symbols", []) or []:
             if s.get("required"):
                 item = s.get("item") or f"Artwork: {s.get('name', s.get('id','Symbol'))}"
                 if item not in items:
                     items.append(item)
-        return items
+        return list(dict.fromkeys(items))
 
     def _visual_compliance_override_cached(self, image, role: str):
         """Return ``(role, cached_shape_detections, requested_items)``.
@@ -993,6 +1001,7 @@ class MultiImageInspectionEngine:
         if not image_paths:
             raise ValueError("No images selected")
         expected = dict(expected or {})
+        self._active_expected = dict(expected)
         started = datetime.now()
         sid = previous_session.session_id if previous_session else f"{started:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
         session_dir = Path(previous_session.session_dir) if previous_session else Path(output_root) / sid
@@ -1277,7 +1286,14 @@ class MultiImageInspectionEngine:
             ("Additional Images", result.additional_image_count), ("Session Cache Hits", result.cache_hits), ("Identity Check", result.identity_status),
             ("S/N", result.identity_values.get("sn", "")), ("MAC", result.identity_values.get("mac", "")),
             ("GPON S/N", result.identity_values.get("gpon_sn", "")), ("Work Order P/N", expected.get("pn", "")),
-            ("Made in", expected.get("made_in", "")), ("Need More Image", ", ".join(result.unresolved_items)),
+            ("Made in", expected.get("made_in", "")),
+            ("S/N Range Enabled", expected.get("sn_range_enabled", False)),
+            ("S/N Range", f"{expected.get('sn_start','')} ~ {expected.get('sn_end','')}"),
+            ("MAC Range Enabled", expected.get("mac_range_enabled", False)),
+            ("MAC Range", f"{expected.get('mac_start','')} ~ {expected.get('mac_end','')}"),
+            ("MAC Allocation Step Enabled", expected.get("mac_step_enabled", False)),
+            ("MAC Qty / Step", expected.get("mac_step", "")),
+            ("Need More Image", ", ".join(result.unresolved_items)),
             ("Conflicts", ", ".join(result.conflicts.keys())),
         ]
         ws.set_column(0, 0, 24); ws.set_column(1, 1, 100)

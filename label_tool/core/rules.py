@@ -1,6 +1,7 @@
 import re
 from typing import Dict, List
 from .models import FieldResult
+from .production_range import check_serial_range, check_mac_range, check_mac_allocation, normalize_mac
 
 
 def _fr(name, actual="", expected="", status="INFO", message="", code=""):
@@ -81,6 +82,36 @@ def validate(fields: Dict[str, str], profile: Dict, expected_work_order=None) ->
         out.append(_fr("Consistency: MAC Text vs Barcode", mac_text, mac_bc, "PASS" if _eq(mac_text, mac_bc) else "FAIL", "" if _eq(mac_text, mac_bc) else "Human-readable differs from barcode", "" if _eq(mac_text, mac_bc) else "XCHK-MAC"))
     else:
         out.append(_fr("Consistency: MAC Text vs Barcode", mac_text, mac_bc, "WARN", "Need both values to cross-check"))
+
+    # Optional production allocation gates. These are work-order inputs, not
+    # model hard-codes. If enabled, the label must pass the configured range;
+    # missing/invalid configuration stays WARN so the factory can Manual Review.
+    sn_for_range = sn_bc or sn_text
+    if expected_work_order.get("sn_range_enabled"):
+        sn_start=str(expected_work_order.get("sn_start","") or "")
+        sn_end=str(expected_work_order.get("sn_end","") or "")
+        ok,detail=check_serial_range(sn_for_range,sn_start,sn_end)
+        status="PASS" if ok is True else "FAIL" if ok is False else "WARN"
+        code="" if ok is True else "WO-SN-RANGE" if ok is False else "WO-SN-RANGE-CONFIG"
+        out.append(_fr("Work Order: S/N Range",sn_for_range,f"{sn_start} ~ {sn_end}",status,"" if ok is True else detail,code))
+
+    mac_for_range = mac_bc or mac_text
+    if expected_work_order.get("mac_range_enabled"):
+        mac_start=str(expected_work_order.get("mac_start","") or "")
+        mac_end=str(expected_work_order.get("mac_end","") or "")
+        ok,detail=check_mac_range(mac_for_range,mac_start,mac_end)
+        status="PASS" if ok is True else "FAIL" if ok is False else "WARN"
+        code="" if ok is True else "WO-MAC-RANGE" if ok is False else "WO-MAC-RANGE-CONFIG"
+        out.append(_fr("Work Order: MAC Range",normalize_mac(mac_for_range),f"{normalize_mac(mac_start)} ~ {normalize_mac(mac_end)}",status,"" if ok is True else detail,code))
+
+    if expected_work_order.get("mac_step_enabled"):
+        mac_start=str(expected_work_order.get("mac_start","") or "")
+        mac_end=str(expected_work_order.get("mac_end","") or "")
+        step=expected_work_order.get("mac_step","")
+        ok,detail=check_mac_allocation(mac_for_range,mac_start,mac_end,step)
+        status="PASS" if ok is True else "FAIL" if ok is False else "WARN"
+        code="" if ok is True else "WO-MAC-STEP" if ok is False else "WO-MAC-STEP-CONFIG"
+        out.append(_fr("Work Order: MAC Allocation Step",normalize_mac(mac_for_range),f"Start={normalize_mac(mac_start)}; End={normalize_mac(mac_end)}; Qty/Step={step}",status,"" if ok is True else detail,code))
 
     # GPON S/N variable
     gp_text = fields.get("gpon_sn_text", "")
