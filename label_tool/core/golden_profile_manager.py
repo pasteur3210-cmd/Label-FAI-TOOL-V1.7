@@ -609,13 +609,26 @@ def _apply_chassis_scope_filter(form_items: list[dict], final_label: Path|None,
                 cy=_code_center_y(c)
                 if cy is not None and (cy/max_y > y1+0.03 or cy/max_y < max(0.0,y0-0.03)):
                     outside_qr=True; break
+    # Track whether an earlier numbered shipped-label item already defines a QR.
+    # GRG-4297u is the important case: #10 defines the QR actually printed on
+    # the outgoing label, while #19 is a separate test-programming QR reference.
+    # Other products (for example VG-8043u) may have only one numbered QR item
+    # whose wording includes 'for test programming' but which is visibly printed
+    # on the shipped label.  Therefore the later test QR is excluded when either
+    # (a) a shipped-label QR was already defined earlier, or (b) the Final Label
+    # image proves a QR exists outside the dense shipped-label band.
+    prior_shipped_qr=False
     for row in form_items:
         raw=str(row.get('raw_text','') or '')
         reason=''
+        is_qr=bool(row.get('machine_code_field')=='qr' or row.get('type')=='Golden QR' or re.search(r'\bqr\s*code\b',raw,re.I))
+        is_test_qr=bool(re.search(r'(?:測試刷入使用|test\s*(?:program|programming|flash))',raw,re.I))
         if _scope_reference_only_text(raw):
             reason='Process/reference instruction; not printed on shipped Chassis Label'
-        elif re.search(r'(?:測試刷入使用|test\s*(?:program|programming|flash))',raw,re.I) and outside_qr:
-            reason='Test-programming code is outside shipped-label scope in Final Label Example'
+        elif is_test_qr and (prior_shipped_qr or outside_qr):
+            reason=('Test-programming QR is reference-only because a shipped-label QR is already defined earlier'
+                    if prior_shipped_qr else
+                    'Test-programming code is outside shipped-label scope in Final Label Example')
         if reason:
             row['inspection_scope']='REFERENCE_ONLY'
             row['scope_reason']=reason
@@ -626,6 +639,8 @@ def _apply_chassis_scope_filter(form_items: list[dict], final_label: Path|None,
             scope['excluded_items'].append({'form_no':row.get('form_no'),'item':row.get('item'),'reason':reason})
         else:
             row['inspection_scope']='CHASSIS_LABEL'
+            if is_qr:
+                prior_shipped_qr=True
     return scope
 
 def _classify_form_item(no: int, body: str) -> dict:
@@ -1096,7 +1111,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.20',
+        'profile_version':'1.9.21',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -1185,7 +1200,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     profile['dynamic_standard_items']=[]
     profile=apply_editable_items(profile,rows)
     profile['golden_item_bindings']=_build_golden_item_bindings(profile)
-    profile['runtime_form_driven_version']='1.9.20'
+    profile['runtime_form_driven_version']='1.9.21'
     profile['golden_scope']=scope_meta
     profile['golden_completeness']={
         'document_item_count':len(form_items),
@@ -1288,7 +1303,7 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
     """
     if not profile.get('dynamic_profile') or not (profile.get('golden_form_items') or []):
         return profile,False,[]
-    if str(profile.get('runtime_form_driven_version',''))=='1.9.20' and profile.get('golden_item_bindings'):
+    if str(profile.get('runtime_form_driven_version',''))=='1.9.21' and profile.get('golden_item_bindings'):
         return profile,False,[]
     before=deepcopy(profile)
     rows=_dynamic_item_rows(profile)
@@ -1321,8 +1336,8 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
         })
     cleaned=apply_editable_items(profile,rows)
     cleaned['golden_scope']=scope_meta
-    cleaned['profile_version']='1.9.20'
-    cleaned['runtime_form_driven_version']='1.9.20'
+    cleaned['profile_version']='1.9.21'
+    cleaned['runtime_form_driven_version']='1.9.21'
     cleaned['golden_item_bindings']=_build_golden_item_bindings(cleaned)
     # Runtime-rule migration for already-imported external profiles.  V1.9.16
     # could persist password_length=0 because Password: Random N characters was
@@ -1452,7 +1467,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.20'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.21'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})

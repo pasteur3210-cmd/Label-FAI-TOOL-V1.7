@@ -371,6 +371,7 @@ class MultiImageInspectionEngine:
                 pass
         result.report_path=self._write_excel(result,result.expected_work_order or {})
         (session_dir/"result.json").write_text(json.dumps(self._serialize(result),ensure_ascii=False,indent=2),encoding="utf-8")
+        self._sync_named_records(result)
         return result
 
     def _rescue_fixed_phrase(self, row_map: dict, raw_text: str, corrected_path: str, item: str, expected: str, roi, threshold: float = 0.74):
@@ -481,6 +482,7 @@ class MultiImageInspectionEngine:
                     f.write(f"{datetime.now().isoformat(timespec='milliseconds')} | {prefix} item={item} auto={auto} final=MANUAL_PASS note={note!r}\n")
         result.report_path=self._write_excel(result,result.expected_work_order or {})
         (session_dir/"result.json").write_text(json.dumps(self._serialize(result),ensure_ascii=False,indent=2),encoding="utf-8")
+        self._sync_named_records(result)
         return result
 
     def _role_items(self):
@@ -995,6 +997,44 @@ class MultiImageInspectionEngine:
                 if self._better(ev, best.get(item)):
                     best[item] = ev
 
+    @staticmethod
+    def _safe_record_token(value: str, fallback: str = "Label") -> str:
+        text=str(value or "").strip()
+        text=re.sub(r"[\\/:*?\"<>|]+", "_", text)
+        text=re.sub(r"\s+", "_", text)
+        text=re.sub(r"_+", "_", text).strip("._ ")
+        return text[:80] or fallback
+
+    def _record_prefix(self) -> str:
+        """Stable human-readable record prefix derived from the active Golden profile."""
+        model=self._safe_record_token(self.profile.get("model") or self.profile.get("profile_name"), "Model")
+        label_type=self._safe_record_token(self.profile.get("label_type"), "Label")
+        label_pn=self._safe_record_token(self.profile.get("label_pn"), "")
+        parts=[model,label_type]
+        if label_pn:
+            parts.append(label_pn)
+        return "_".join(x for x in parts if x)
+
+    def _sync_named_records(self, result: MultiImageResult) -> None:
+        """Create human-readable aliases while preserving canonical internal filenames."""
+        session_dir=Path(result.session_dir)
+        prefix=self._record_prefix()
+        aliases={
+            "execution.log":f"{prefix}_Execution_Log_{result.session_id}.log",
+            "test.log":f"{prefix}_Test_Log_{result.session_id}.log",
+            "debug.log":f"{prefix}_Debug_Log_{result.session_id}.log",
+            "performance.log":f"{prefix}_Performance_Log_{result.session_id}.log",
+            "result.json":f"{prefix}_Result_{result.session_id}.json",
+        }
+        for src_name,dst_name in aliases.items():
+            src=session_dir/src_name
+            if not src.exists():
+                continue
+            try:
+                shutil.copy2(src,session_dir/dst_name)
+            except Exception:
+                pass
+
     def inspect_batch(self, image_paths: list[str], output_root="image_records", expected=None,
                       previous_session: MultiImageResult | None = None, progress_callback=None,
                       cancel_event=None, target_items=None) -> MultiImageResult:
@@ -1004,7 +1044,8 @@ class MultiImageInspectionEngine:
         self._active_expected = dict(expected)
         started = datetime.now()
         sid = previous_session.session_id if previous_session else f"{started:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
-        session_dir = Path(previous_session.session_dir) if previous_session else Path(output_root) / sid
+        record_prefix=self._record_prefix()
+        session_dir = Path(previous_session.session_dir) if previous_session else Path(output_root) / f"{record_prefix}_{sid}"
         session_dir.mkdir(parents=True, exist_ok=True)
         src_dir = session_dir / "source_images"; src_dir.mkdir(exist_ok=True)
         execution_log = session_dir / "execution.log"
@@ -1237,6 +1278,7 @@ class MultiImageInspectionEngine:
         (session_dir / "result.json").write_text(json.dumps(self._serialize(result), ensure_ascii=False, indent=2), encoding="utf-8")
         report_ms = (time.perf_counter()-report_started)*1000.0
         write(performance_log, f"REPORT excel_json_ms={report_ms:.1f} overall={result.overall}")
+        self._sync_named_records(result)
         progress("completed", len(queued), len(queued), "", elapsed_ms=report_ms)
         return result
 
@@ -1268,7 +1310,7 @@ class MultiImageInspectionEngine:
         }
 
     def _write_excel(self, result: MultiImageResult, expected: dict):
-        p = Path(result.session_dir) / f"Label_Image_Inspection_Report_{result.session_id}.xlsx"
+        p = Path(result.session_dir) / f"{self._record_prefix()}_Image_Inspection_Report_{result.session_id}.xlsx"
         wb = xlsxwriter.Workbook(str(p))
         h = wb.add_format({"bold": True, "bg_color": "#4472C4", "font_color": "#FFFFFF", "border": 1})
         c = wb.add_format({"border": 1, "text_wrap": True, "valign": "top"})
@@ -1280,8 +1322,11 @@ class MultiImageInspectionEngine:
             ("Overall", result.overall), ("Automatic Overall", result.automatic_overall or result.overall),
             ("Manual Overrides", len(result.manual_overrides)), ("Manual Review Actions", len(result.manual_reviews)), ("Inspection Mode", "GUIDED_MULTI_IMAGE"),
             ("Recommended Capture", "Full Label + Basic + WiFi + Identity + Compliance"),
-            ("Profile", self.profile.get("profile_name", "")), ("Label Type", self.profile.get("label_type", "")),
-            ("Software Version", self.software_version), ("Session ID", result.session_id),
+            ("Profile", self.profile.get("profile_name", "")), ("Model", self.profile.get("model", "")),
+            ("Label Type", self.profile.get("label_type", "")), ("Label P/N", self.profile.get("label_pn", "")),
+            ("Request Form", (self.profile.get("golden_import", {}) or {}).get("source_file", self.profile.get("source_spec", ""))),
+            ("Program Version", self.software_version), ("Profile Version", self.profile.get("profile_version", "")),
+            ("Session ID", result.session_id),
             ("Images Loaded", result.image_count), ("Initial Batch", result.initial_image_count),
             ("Additional Images", result.additional_image_count), ("Session Cache Hits", result.cache_hits), ("Identity Check", result.identity_status),
             ("S/N", result.identity_values.get("sn", "")), ("MAC", result.identity_values.get("mac", "")),
