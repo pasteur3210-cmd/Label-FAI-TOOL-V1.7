@@ -1,0 +1,112 @@
+name: Build Label Inspection Tool V1.9.22
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+      - name: Workspace cleanup (remove stale cache/build artifacts)
+        run: python tools/clean_workspace.py
+      - name: Release gate (version, Python 3.11, package hygiene)
+        run: python tools/release_gate.py
+      - name: End-to-end integration gate (Dynamic Golden + Legacy runtime contract)
+        run: python tools/integration_gate.py
+      - name: Static undefined-name check (Ruff F821)
+        run: ruff check label_tool --select F821
+      - name: Compile check
+        run: python -m compileall -q label_tool tests
+      - name: Unit tests + test log
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release_logs | Out-Null
+          python -m unittest discover -s tests -v 2>&1 | Tee-Object -FilePath release_logs\test_log.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build EXE
+        run: pyinstaller --noconfirm build.spec
+      - name: Packaged EXE OCR runtime smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release_logs | Out-Null
+          $exe = Resolve-Path "dist\Label_Inspection_Tool\Label_Inspection_Tool.exe"
+          $out = Join-Path $PWD "release_logs\exe_ocr_smoke.json"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test-ocr","--self-test-output",$out -PassThru -Wait
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $out) { Get-Content $out }
+            throw "Packaged EXE OCR smoke test failed with exit code $($p.ExitCode)"
+          }
+          Get-Content $out
+      - name: Copy external profiles
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\Label_Inspection_Tool\profiles | Out-Null
+          Copy-Item label_tool\profiles\*.json dist\Label_Inspection_Tool\profiles\ -Force
+      - name: Copy external Golden Artwork
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\Label_Inspection_Tool\golden_artwork | Out-Null
+          Copy-Item label_tool\golden_artwork\* dist\Label_Inspection_Tool\golden_artwork\ -Recurse -Force
+      - name: Packaged EXE Artwork resource smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release_logs | Out-Null
+          $exe = Resolve-Path "dist\Label_Inspection_Tool\Label_Inspection_Tool.exe"
+          $out = Join-Path $PWD "release_logs\exe_artwork_smoke.json"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test-artwork","--self-test-output",$out -PassThru -Wait
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $out) { Get-Content $out }
+            throw "Packaged EXE Artwork smoke test failed with exit code $($p.ExitCode)"
+          }
+          Get-Content $out
+      - name: Packaged EXE Unicode and space path smoke test
+        shell: pwsh
+        run: |
+          $unicodeRoot = Join-Path $env:RUNNER_TEMP "AI 小程式\TEST TOOL\Label_Inspection_Tool"
+          New-Item -ItemType Directory -Force -Path $unicodeRoot | Out-Null
+          Copy-Item "dist\Label_Inspection_Tool\*" $unicodeRoot -Recurse -Force
+          $exe = Join-Path $unicodeRoot "Label_Inspection_Tool.exe"
+          $out = Join-Path $PWD "release_logs\exe_artwork_unicode_path_smoke.json"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test-artwork","--self-test-output",$out -PassThru -Wait
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $out) { Get-Content $out }
+            throw "Packaged EXE Unicode/space path smoke test failed with exit code $($p.ExitCode)"
+          }
+          Get-Content $out
+      - name: Packaged EXE Multi-image mode smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release_logs | Out-Null
+          $exe = Resolve-Path "dist\Label_Inspection_Tool\Label_Inspection_Tool.exe"
+          $out = Join-Path $PWD "release_logs\exe_multi_image_smoke.json"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test-multi-image","--self-test-output",$out -PassThru -Wait
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $out) { Get-Content $out }
+            throw "Packaged EXE multi-image smoke test failed with exit code $($p.ExitCode)"
+          }
+          Get-Content $out
+      - name: Build environment record
+        shell: pwsh
+        run: |
+          python --version | Out-File release_logs\build_environment.txt
+          pip freeze | Out-File -Append release_logs\build_environment.txt
+          "Version: V1.9.22" | Out-File -Append release_logs\build_environment.txt
+          "Build UTC: $(Get-Date -AsUTC -Format o)" | Out-File -Append release_logs\build_environment.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Label_Inspection_Tool_V1.9.22_Performance_Dynamic_Golden_Profile_Windows
+          path: |
+            dist/Label_Inspection_Tool/**
+            release_logs/**
