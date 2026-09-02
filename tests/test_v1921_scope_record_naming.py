@@ -83,7 +83,7 @@ def test_record_prefix_contains_model_label_type_and_label_pn():
     eng=MultiImageInspectionEngine({
         'model':'GRG-4297u','label_type':'Chassis Label','label_pn':'680010-378',
         'live':{'required_items':[]},'rules':{'sn_regex':'.*'},
-    }, software_version='1.9.21')
+    }, software_version='1.9.22')
     assert eng._record_prefix()=='GRG-4297u_Chassis_Label_680010-378'
 
 
@@ -95,25 +95,24 @@ def test_excel_filename_and_summary_include_traceable_golden_metadata(tmp_path):
         'golden_import':{'source_file':'680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label.doc'},
         'live':{'required_items':[]},'rules':{'sn_regex':'.*'},
     }
-    eng=MultiImageInspectionEngine(profile, software_version='1.9.21')
+    eng=MultiImageInspectionEngine(profile, software_version='1.9.22')
     r=MultiImageResult(session_id='20260902_170000_abc123',session_dir=str(tmp_path),overall='PASS',automatic_overall='PASS')
     path=Path(eng._write_excel(r,{}))
-    assert path.name=='GRG-4297u_Chassis_Label_680010-378_Image_Inspection_Report_20260902_170000_abc123.xlsx'
+    assert path.name=='Inspection_Report.xlsx'
     with zipfile.ZipFile(path) as z:
         text='\n'.join(z.read(n).decode('utf-8','ignore') for n in z.namelist() if n.endswith('.xml'))
-    for token in ('Request Form','Program Version','Profile Version','680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label.doc','1.9.21','1.9.19'):
+    for token in ('Request Form','Program Version','Profile Version','680010-378 GRG-4297u-TSL-P1 738125-001 Chassis Label.doc','1.9.22','1.9.19'):
         assert token in text
 
 
 def test_named_log_aliases_are_created_without_breaking_canonical_internal_files(tmp_path):
     profile={'model':'GRG-4297u','label_type':'Chassis Label','label_pn':'680010-378','live':{'required_items':[]},'rules':{'sn_regex':'.*'}}
-    eng=MultiImageInspectionEngine(profile,'1.9.21')
+    eng=MultiImageInspectionEngine(profile,'1.9.22')
     sid='20260902_170000_abc123'
     r=MultiImageResult(session_id=sid,session_dir=str(tmp_path))
     for name in ('execution.log','test.log','debug.log','performance.log','result.json'):
         (tmp_path/name).write_text(name,encoding='utf-8')
     eng._sync_named_records(r)
-    prefix='GRG-4297u_Chassis_Label_680010-378'
     for kind in ('Execution_Log','Test_Log','Debug_Log','Performance_Log'):
-        assert (tmp_path/f'{prefix}_{kind}_{sid}.log').exists()
-    assert (tmp_path/f'{prefix}_Result_{sid}.json').exists()
+        assert (tmp_path/f'{kind}.log').exists()
+    assert (tmp_path/'Result.json').exists()

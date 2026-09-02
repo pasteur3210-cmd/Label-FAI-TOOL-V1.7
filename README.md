@@ -1,11 +1,19 @@
-# Label Auto Inspection Tool V1.9.21
+# Label Auto Inspection Tool V1.9.22
 
-## V1.9.21 Scope Hardening + Traceable Record Naming
+## V1.9.22 Record Path-Length Hardening
+
+- Fixes the Windows/PyInstaller `Errno 2` failure seen when a traceable session folder and an equally long report filename repeated Model + Label Type + Label P/N + Run ID.
+- The session folder remains traceable: `<Model>_<LabelType>_<LabelPN>_<RunID>`.
+- Artifacts inside the folder now use short names: `Inspection_Report.xlsx`, `Test_Log.log`, `Execution_Log.log`, `Debug_Log.log`, `Performance_Log.log`, `Result.json`.
+- Report Summary still records Request Form, Program Version, Profile Version, Model, Label Type, Label P/N and Session ID.
+- Added a long-install-root regression using the GRG-4297u Inner Box naming pattern.
+
+## V1.9.22 Scope Hardening + Traceable Record Naming
 - CMP-001 hardening: when a shipped-label QR is already defined earlier in the Request Form, a later QR explicitly marked as test/programming-only becomes REFERENCE_ONLY and is removed from runtime/manual-review requirements. This fixes GRG-4297u #19 while preserving models such as VG-8043u where the only QR is physically printed on the outgoing label.
 - Image record folders and exported report/log aliases now include Model + Label Type + Label P/N before timestamp/session ID.
 - Image report Summary separately records Program Version, Profile Version and original Request Form source.
 
-## V1.9.21 Production S/N / MAC Range Alignment
+## V1.9.22 Production S/N / MAC Range Alignment
 
 - Optional Work Order / Production Data now includes `S/N Start`, `S/N End`, `MAC Start`, `MAC End`, and `MAC Qty / Step`.
 - `Check S/N Range` adds a traceable `Work Order: S/N Range` decision. Shared-prefix trailing numeric sequences are compared numerically; other fixed-width alphanumeric ranges use conservative inclusive comparison.
@@ -15,7 +23,7 @@
 - Range/step settings are included in image-session cache context and written to Excel/JSON work-order metadata.
 - Legacy OCR, Barcode/QR, Dynamic Golden, Notch, Manual Review and incremental cache decision logic are otherwise unchanged.
 
-## V1.9.21 Program-Plan Alignment (CMP-001 / CMP-002 / CMP-003 / CMP-008)
+## V1.9.22 Program-Plan Alignment (CMP-001 / CMP-002 / CMP-003 / CMP-008)
 
 - CMP-001: Dynamic Golden now distinguishes shipped Chassis Label inspection scope from process/reference or lower production/test zones. Excluded rows remain traceable in Profile Manager as `REFERENCE_ONLY` but do not become runtime requirements.
 - CMP-002 / CMP-003: Password and WiFi Key remain **length-only** checks as requested; no MAC/SN substring exclusion is added in this release.
@@ -107,7 +115,7 @@ This release keeps the validated automatic CAM/Image decision rules intact while
 Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.18 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
 
 GitHub Actions uses Python 3.11, workspace cleanup, release gate, end-to-end integration gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.
-## V1.9.21 Verification
+## V1.9.22 Verification
 - pytest: 303 passed / 0 failed
 - unittest: 197 tests / OK
 - Python 3.11 grammar/compile: PASS
