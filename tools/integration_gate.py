@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V1.9.17 integration gate.
+"""V1.9.19 integration gate.
 
 This gate protects the production Legacy CAM/Image engine while proving that
 Dynamic Golden data reaches the runtime correctly and that operator Golden
@@ -21,11 +21,13 @@ from label_tool.core.golden_profile_manager import (
     apply_editable_items,
     extract_golden_form_items,
     validation_readiness_errors,
+    _apply_chassis_scope_filter,
+    _extract_notch_direction,
 )
 from label_tool.core.parser import merge_fields
 from label_tool.core.profile_manager import _display_name
 from label_tool.core.rules import validate
-from label_tool.core.multi_image_inspection import MultiImageInspectionEngine, MultiImageResult
+from label_tool.core.multi_image_inspection import MultiImageInspectionEngine, MultiImageResult, detect_label_notch_direction, NOTCH_ITEM
 
 GOLDEN = '''
 Chassis Label Request Form
@@ -173,7 +175,7 @@ Finished Information:
     # Field-record regression: session fusion must preserve normalized QR S/N +
     # MAC facts and must not turn a single-image QR PASS into a conflict.
     fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
-    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.17')
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.19')
     mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
     mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
     best={}; conflicts={}
@@ -209,6 +211,8 @@ Finished Information:
         check(token in app, f'Item-aware Golden review is missing: {token}')
     check('showing full Golden' in app and '_golden_review_artwork_marker' in app, 'Artwork fallback/marker safety is missing')
     check('artwork_review_roi' in app, 'Artwork focus is not restricted to an explicit verified ROI')
+    check('_golden_review_machine_code_box' in app and '_golden_review_field_key' in app, 'V1.9.19 field-safe machine-code review locator is missing')
+    check('factory-review locator: use a callout arrow as' in app and 'draw.polygon([(cx,cy),p1,p2]' in app, 'V1.9.19 arrow/callout Golden locator is missing')
     check("render_golden(None,'Final Label / Full Golden reference',golden_crop)" in app, 'Manual Review does not start on the complete Final Label with current-item marker')
     check('REVIEW: {item}' in app and 'golden_focus_allowed=bool(golden_crop)' in app, 'Golden current-item highlight / safe Focus policy missing')
     check('Golden Item Specification / Golden 項目說明' in app and '_golden_item_specification' in app, 'Golden item-specific specification panel missing')
@@ -236,7 +240,18 @@ Finished Information:
     check('_docx_final_label_media_names' in gp and 'document:Label Example' in gp, 'Final Label structural document-position guard is missing')
     check('counters[key]=counters.get(key,0)+1' in gp, 'Word list-number reconstruction guard is missing')
 
-    print('[INTEGRATION_GATE][PASS] form-driven multi-model completeness, barcode/QR non-bypass, dynamic isolation, QR fusion, item-aware review, stale-Golden isolation')
+    # 9) V1.9.19 alignment: CMP-001 shipped-label scope, CMP-002/003 length-only, CMP-008 notch.
+    scope_rows=extract_golden_form_items('1. Model: GRG-4297u\n2. 匯入列印方式參考 Chassis Label 列印說明\nFinished Information:')
+    scope_meta=_apply_chassis_scope_filter(scope_rows,None,[],[])
+    check(scope_rows[0].get('required') is True, 'CMP-001 incorrectly excluded a shipped-label item')
+    check(scope_rows[1].get('required') is False and scope_rows[1].get('inspection_scope')=='REFERENCE_ONLY', 'CMP-001 process/reference item was not excluded')
+    length_rules=_rules_from_golden_text('8. Password: Random 8 characters\n10. WiFi Key: Random 14 碼')
+    check(length_rules.get('password_length')==8 and length_rules.get('wifi_key_length')==14, 'CMP-002/003 length-only rules changed')
+    notch,notch_text=_extract_notch_direction('Label Example: 印出後貼紙缺角處在左上角')
+    check(notch=='TOP_LEFT' and notch_text, 'CMP-008 notch direction was not extracted from Request Form')
+    check('detect_label_notch_direction' in mi and NOTCH_ITEM=='Geometry: Label Notch Direction', 'CMP-008 runtime notch/manual path missing')
+
+    print('[INTEGRATION_GATE][PASS] form-driven completeness, CMP-001 scope filter, CMP-002/003 length-only, CMP-008 notch, barcode/QR non-bypass, dynamic isolation, QR fusion, manual review')
     return 0
 
 
