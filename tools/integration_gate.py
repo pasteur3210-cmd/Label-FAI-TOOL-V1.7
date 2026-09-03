@@ -175,7 +175,7 @@ Finished Information:
     # Field-record regression: session fusion must preserve normalized QR S/N +
     # MAC facts and must not turn a single-image QR PASS into a conflict.
     fusion_profile={**profile,'live':{'required_items':['Variable: WiFi QR Format']}}
-    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.23')
+    fusion=MultiImageInspectionEngine(fusion_profile,'1.9.24')
     mr=MultiImageResult(overall='NEED_MORE_IMAGE',session_id='gate',session_dir=tempfile.gettempdir())
     mr.session_fields={k:fields[k] for k in ('wifi_qr','qr_sn','qr_mac','qr_wifi_key','sn_text','mac_text','wifi_key') if k in fields}
     best={}; conflicts={}
@@ -277,7 +277,7 @@ Finished Information:
     vg19=next(r for r in vg_rows if r.get('form_no')==19)
     check(vg19.get('inspection_scope')=='CHASSIS_LABEL' and vg19.get('required'),'V1.9.22 incorrectly excluded the sole shipped VG QR')
     naming_profile={'model':'GRG-4297u','label_type':'Chassis Label','label_pn':'680010-378','live':{'required_items':[]},'rules':{'sn_regex':'.*'}}
-    naming_engine=MultiImageInspectionEngine(naming_profile,'1.9.23')
+    naming_engine=MultiImageInspectionEngine(naming_profile,'1.9.24')
     check(naming_engine._record_prefix()=='GRG-4297u_Chassis_Label_680010-378','V1.9.22 record prefix is not traceable')
 
     print('[INTEGRATION_GATE][PASS] form-driven completeness, scope/notch, barcode/QR, manual review, S/N range, MAC range/allocation-step, QR scope hardening, record naming')

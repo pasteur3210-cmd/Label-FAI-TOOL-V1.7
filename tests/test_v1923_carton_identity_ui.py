@@ -46,7 +46,7 @@ class V1923CartonIdentityUI(unittest.TestCase):
     def test_release_artifact_name_is_short(self):
         root=Path(__file__).resolve().parents[1]
         workflow=(root/'.github/workflows/build.yml').read_text(encoding='utf-8')
-        self.assertIn('name: Label_Inspection_Tool_V1.9.23', workflow)
+        self.assertIn('name: Label_Inspection_Tool_V1.9.24', workflow)
         self.assertNotIn('Performance_Dynamic_Golden_Profile_Windows', workflow)
 
 

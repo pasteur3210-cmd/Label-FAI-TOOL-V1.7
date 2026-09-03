@@ -1,13 +1,14 @@
-# Label Auto Inspection Tool V1.9.23
+# Label Auto Inspection Tool V1.9.24
 
-## V1.9.23 Carton Identity + Operator UI
+## V1.9.24 Golden-Scope Work-Order + Report Traceability Fix
 
-- Carton Request Forms now resolve the **finished printed label P/N**, not the blank stock P/N. For the supplied GRG-4297u Carton form: `Blank Label Part Number = 502109-020` is excluded and `Carton Label Part Number = 680010-354` is used as Label P/N.
-- `Carton Label Request Form` is detected as `Label Type = Carton Label`.
-- Internal Model and Label Type are kept separate. If metadata is accidentally entered as `GRG-4297u Carton` while Label Type is `Carton Label`, the canonical identity normalizes Internal Model to `GRG-4297u`.
-- Image inspection UI is more compact so the bottom Inspection Item table retains visible working area: Overall status font reduced, Manual Review list height reduced, and panel spacing tightened.
-- Manual Review makes operator decision data visually dominant: Inspection Item 19 pt, Actual/Expected 16 pt, Golden Item Specification 14 pt; Mode/Reason remain secondary.
-- Release naming is simplified: program folder / ZIP / GitHub artifact use only program name + version. Change descriptions live in Markdown.
+- **Golden/Profile scope now overrides stale GUI production checkboxes.** A Dynamic Golden / imported Request Form that does not define MAC cannot inherit `Check MAC Range` or `Check MAC Allocation Step` from the previously used label.
+- For the supplied GRG-4297u **Carton Label**, MAC checks are automatically disabled because the Request Form contains no MAC requirement. C/T S/N remains in scope as serial-number content.
+- The same scope rule is enforced in both GUI snapshots and `MultiImageInspectionEngine`, so an out-of-scope MAC check cannot affect `automatic_overall`, `overall`, `unresolved_items`, or `Inspection_Result`.
+- The work-order metadata written to JSON/Excel is scope-sanitized (`mac_range_enabled=false`, `mac_step_enabled=false`) for this Carton profile even if the previous GUI state had them checked.
+- Excel Summary terminology is clearer: `Overall` becomes **Final Result** and `Automatic Overall` becomes **Auto Result Before Manual Review**. This preserves traceability while making it clear that a manual PASS can legitimately differ from the original automatic result.
+- Existing V1.9.23 Carton identity fixes remain: finished Carton Label P/N `680010-354`, Model `GRG-4297u`, Label Type `Carton Label`, compact main UI, and enlarged Manual Review comparison text.
+- Release folder / ZIP / GitHub artifact naming remains short: program name + version only.
 
 ## V1.9.22 Record Path-Length Hardening
 
@@ -124,13 +125,14 @@ This release keeps the validated automatic CAM/Image decision rules intact while
 Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.18 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
 
 GitHub Actions uses Python 3.11, workspace cleanup, release gate, end-to-end integration gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.
-## V1.9.23 Verification
-- pytest: 311 passed / 0 failed
-- unittest: 202 tests / OK
-- New V1.9.23 Carton/UI regression: 5 tests / OK
-- Python 3.11 grammar/compile: PASS
-- Integration Gate: PASS
-- Release Gate: PASS (`version=1.9.23`, `python311_files=105`)
-- Clean package cache/build artifacts: 0 after final cleanup
-- Local Ruff F821 could not be executed in this offline Linux environment because Ruff is not installed; the GitHub Actions workflow installs Ruff and keeps the mandatory F821 gate before Windows build.
-- GitHub Actions continues to enforce Windows PyInstaller + packaged EXE OCR/Artwork/Multi-image smoke tests.
+## V1.9.24 Verification
+- User field record reviewed: V1.9.23 `result.json` showed `Work Order: MAC Allocation Step = NEED_MORE_IMAGE / MAC not recognized` on a Carton Label with no MAC field, confirming the stale-scope root cause.
+- pytest: **316 passed / 0 failed**
+- unittest: **202 tests / OK**
+- New V1.9.24 scope/report regression: **5 tests / OK**
+- Integration Gate: **PASS**
+- Python 3.11 release grammar gate: **PASS**
+- Release Gate after workspace cleanup: **PASS** (`version=1.9.24`, `python311_files=106`)
+- Final Clean package must contain **0** `.pytest_cache`, `__pycache__`, `*.pyc`, build/dist/temp artifacts.
+- Local Ruff is not installed in this offline Linux runtime; GitHub Actions retains mandatory Ruff F821 before Windows build.
+- Windows PyInstaller + packaged EXE OCR/Artwork/Multi-image smoke tests remain enforced by GitHub Actions.

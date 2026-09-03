@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = '1.9.23'
+EXPECTED_VERSION = '1.9.24'
 REQUIRED = [
     '.github/workflows/build.yml',
     'label_tool/__init__.py',
@@ -111,6 +111,14 @@ def main() -> int:
         fail('V1.9.22 stale external Dynamic Profile migration is missing')
     if 'validation_readiness_summary' not in gp or 'MANUAL review' not in app:
         fail('V1.9.22 Validate does not accept MANUAL as a first-class handling path')
+
+    multi=(ROOT/'label_tool/core/multi_image_inspection.py').read_text(encoding='utf-8')
+    if 'profile_supports_work_order_field' not in multi or '_scope_expected_work_order' not in multi:
+        fail('V1.9.24 Golden/Profile work-order scope guard is missing')
+    if 'Final Result' not in multi or 'Auto Result Before Manual Review' not in multi:
+        fail('V1.9.24 report result terminology guard is missing')
+    if '_apply_work_order_scope_ui' not in app or 'mac_step_check' not in app:
+        fail('V1.9.24 GUI work-order scope isolation is missing')
 
 
     pm=(ROOT/'label_tool/core/profile_manager.py').read_text(encoding='utf-8')
