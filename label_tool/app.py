@@ -18,7 +18,7 @@ from PIL import Image, ImageTk, ImageDraw
 from . import __version__
 from .core.engine import InspectionEngine
 from .core.artwork_presence import resolve_artwork_file
-from .core.multi_image_inspection import MultiImageInspectionEngine, IDENTITY_REVIEW_ITEM
+from .core.multi_image_inspection import MultiImageInspectionEngine, IDENTITY_REVIEW_ITEM, profile_supports_work_order_field
 from .core.profile_manager import discover_profiles
 from .core.golden_profile_manager import (build_dynamic_profile, validate_profile_structure, mark_validated, dynamic_identity_errors,
     _dynamic_item_rows, apply_editable_items, save_profile_identity_edits, STANDARD_LIBRARY, validation_readiness_errors, validation_readiness_summary, normalize_dynamic_profile_for_runtime, select_final_label_image)
@@ -394,7 +394,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.23'
+                working['profile_version']='1.9.24'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -489,17 +489,20 @@ class App(tk.Tk):
         ttk.Entry(wo,textvariable=self.expected_sn_start,width=25).grid(row=1,column=1,padx=(5,12),pady=(7,0),sticky="w")
         ttk.Label(wo,text="S/N End").grid(row=1,column=2,sticky="w",pady=(7,0))
         ttk.Entry(wo,textvariable=self.expected_sn_end,width=25).grid(row=1,column=3,padx=(5,12),pady=(7,0),sticky="w")
-        ttk.Checkbutton(wo,text="Check S/N Range",variable=self.expected_sn_range_enabled,command=self._on_production_data_change).grid(row=1,column=4,sticky="w",pady=(7,0))
+        self.sn_range_check = ttk.Checkbutton(wo,text="Check S/N Range",variable=self.expected_sn_range_enabled,command=self._on_production_data_change)
+        self.sn_range_check.grid(row=1,column=4,sticky="w",pady=(7,0))
 
         ttk.Label(wo,text="MAC Start").grid(row=2,column=0,sticky="w",pady=(7,0))
         ttk.Entry(wo,textvariable=self.expected_mac_start,width=25).grid(row=2,column=1,padx=(5,12),pady=(7,0),sticky="w")
         ttk.Label(wo,text="MAC End").grid(row=2,column=2,sticky="w",pady=(7,0))
         ttk.Entry(wo,textvariable=self.expected_mac_end,width=25).grid(row=2,column=3,padx=(5,12),pady=(7,0),sticky="w")
-        ttk.Checkbutton(wo,text="Check MAC Range",variable=self.expected_mac_range_enabled,command=self._on_production_data_change).grid(row=2,column=4,sticky="w",pady=(7,0))
+        self.mac_range_check = ttk.Checkbutton(wo,text="Check MAC Range",variable=self.expected_mac_range_enabled,command=self._on_production_data_change)
+        self.mac_range_check.grid(row=2,column=4,sticky="w",pady=(7,0))
 
         ttk.Label(wo,text="MAC Qty / Step").grid(row=3,column=0,sticky="w",pady=(7,0))
         ttk.Entry(wo,textvariable=self.expected_mac_step,width=12).grid(row=3,column=1,padx=(5,12),pady=(7,0),sticky="w")
-        ttk.Checkbutton(wo,text="Check MAC Allocation Step",variable=self.expected_mac_step_enabled,command=self._on_production_data_change).grid(row=3,column=2,columnspan=2,sticky="w",pady=(7,0))
+        self.mac_step_check = ttk.Checkbutton(wo,text="Check MAC Allocation Step",variable=self.expected_mac_step_enabled,command=self._on_production_data_change)
+        self.mac_step_check.grid(row=3,column=2,columnspan=2,sticky="w",pady=(7,0))
         ttk.Label(wo,text="Example: 10 = each unit uses 10 MACs",foreground="#666666").grid(row=3,column=4,sticky="w",pady=(7,0))
 
         nb = ttk.Notebook(self)
@@ -605,7 +608,7 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.23 Carton identity + operator UI: finished Label P/N priority, Model/Label Type separation, compact result area and enlarged Manual Review comparison text.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.24 Carton identity + operator UI: finished Label P/N priority, Model/Label Type separation, compact result area and enlarged Manual Review comparison text.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
@@ -705,6 +708,7 @@ class App(tk.Tk):
             f"Label P/N: {data.get('label_pn','')} | Spec: {data.get('spec_version','')} | "
             f"Profile Ver: {data.get('profile_version','')} | Status: {data.get('profile_status','BUNDLED')} | File: {path.name}"
         )
+        self._apply_work_order_scope_ui(data)
         self._reset_live_tree()
         self._update_zone_ui()
         art_status=self.zone_ocr.artwork.resource_status()
@@ -712,6 +716,23 @@ class App(tk.Tk):
         log.info('PROFILE_LOADED name=%s file=%s',name,path)
         if profile_changed:
             self._invalidate_image_result_after_profile_change(name)
+
+    def _apply_work_order_scope_ui(self, profile: dict):
+        """Disable production checks that are outside the imported Golden scope."""
+        sn_ok=profile_supports_work_order_field(profile, "sn")
+        mac_ok=profile_supports_work_order_field(profile, "mac")
+        if not sn_ok:
+            self.expected_sn_range_enabled.set(False)
+        if not mac_ok:
+            self.expected_mac_range_enabled.set(False)
+            self.expected_mac_step_enabled.set(False)
+        for widget, enabled in ((getattr(self,"sn_range_check",None),sn_ok),
+                                (getattr(self,"mac_range_check",None),mac_ok),
+                                (getattr(self,"mac_step_check",None),mac_ok)):
+            if widget is not None:
+                try: widget.configure(state="normal" if enabled else "disabled")
+                except Exception: pass
+        log.info("WORK_ORDER_SCOPE label_type=%s sn=%s mac=%s", profile.get("label_type",""), sn_ok, mac_ok)
 
     def _invalidate_image_result_after_profile_change(self, profile_name: str):
         """Never show/use evidence produced under a previously loaded Golden.
@@ -767,9 +788,11 @@ class App(tk.Tk):
         d={}
         if self.expected_pn.get().strip():d['pn']=self.expected_pn.get().strip()
         if self.expected_country.get().strip():d['made_in']=self.expected_country.get().strip()
-        d['sn_range_enabled']=bool(self.expected_sn_range_enabled.get())
-        d['mac_range_enabled']=bool(self.expected_mac_range_enabled.get())
-        d['mac_step_enabled']=bool(self.expected_mac_step_enabled.get())
+        sn_scope=profile_supports_work_order_field(self.engine.profile if self.engine else {}, "sn")
+        mac_scope=profile_supports_work_order_field(self.engine.profile if self.engine else {}, "mac")
+        d['sn_range_enabled']=bool(self.expected_sn_range_enabled.get()) and sn_scope
+        d['mac_range_enabled']=bool(self.expected_mac_range_enabled.get()) and mac_scope
+        d['mac_step_enabled']=bool(self.expected_mac_step_enabled.get()) and mac_scope
         if self.expected_sn_start.get().strip():d['sn_start']=self.expected_sn_start.get().strip()
         if self.expected_sn_end.get().strip():d['sn_end']=self.expected_sn_end.get().strip()
         if self.expected_mac_start.get().strip():d['mac_start']=self.expected_mac_start.get().strip()
@@ -781,9 +804,10 @@ class App(tk.Tk):
         items=list(self.engine.profile.get('live',{}).get('required_items',[]))
         if self.expected_pn.get().strip(): items.append('Work Order: P/N')
         if self.expected_country.get().strip(): items.append('Work Order: Made in')
-        if self.expected_sn_range_enabled.get(): items.append('Work Order: S/N Range')
-        if self.expected_mac_range_enabled.get(): items.append('Work Order: MAC Range')
-        if self.expected_mac_step_enabled.get(): items.append('Work Order: MAC Allocation Step')
+        scoped=self._expected()
+        if scoped.get('sn_range_enabled'): items.append('Work Order: S/N Range')
+        if scoped.get('mac_range_enabled'): items.append('Work Order: MAC Range')
+        if scoped.get('mac_step_enabled'): items.append('Work Order: MAC Allocation Step')
         return list(dict.fromkeys(items))
 
     def _reset_live_tree(self):
@@ -2911,7 +2935,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.23 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.24 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.

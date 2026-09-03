@@ -68,6 +68,42 @@ ROLE_ITEMS_CHASSIS = {
     },
 }
 
+
+
+def profile_supports_work_order_field(profile: dict, field: str) -> bool:
+    """Return whether the current Golden/Profile explicitly supports a work-order check.
+
+    Dynamic Golden profiles are form-driven: S/N/MAC production checks must not
+    leak in from a previous model merely because the GUI checkbox stayed selected.
+    Legacy bundled profiles keep the historical permissive behavior unless the
+    label is clearly a Carton Label with no matching field in its required scope.
+    """
+    field=str(field or "").strip().lower()
+    if field not in {"sn", "mac"}:
+        return True
+    live_items=list((profile.get("live", {}) or {}).get("required_items", []) or [])
+    form_items=list(profile.get("golden_form_items", []) or [])
+    explicit_parts=[]
+    explicit_parts.extend(str(x) for x in live_items)
+    for row in form_items:
+        if not isinstance(row, dict):
+            continue
+        for key in ("item", "raw_text", "expected", "presence_item", "type", "source"):
+            explicit_parts.append(str(row.get(key, "") or ""))
+        explicit_parts.extend(str(x) for x in (row.get("engine_items", []) or []))
+    text="\n".join(explicit_parts).upper()
+    if field == "mac":
+        explicit=bool(re.search(r"(?<![A-Z0-9])MAC(?![A-Z0-9])", text))
+    else:
+        explicit=bool(re.search(r"(?<![A-Z0-9])S\s*/?\s*N(?![A-Z0-9])|SERIAL\s+NUMBER", text))
+    if explicit:
+        return True
+    form_driven=bool(profile.get("dynamic_profile") or profile.get("golden_import") or form_items)
+    label_type=str(profile.get("label_type", "") or "").lower()
+    if form_driven or "carton" in label_type:
+        return False
+    return True
+
 ROLE_ITEMS_INNER = {
     "BASIC": {"Fixed: GPON VoIP Gateway", "Fixed: model", "Variable: P/N Format", "Artwork: COMTREND Logo"},
     "WIFI": {"Fixed: DoC Link"},
@@ -581,9 +617,18 @@ class MultiImageInspectionEngine:
             return nr > orr
         return new.quality_score > old.quality_score
 
+    def _scope_expected_work_order(self, expected: dict | None) -> dict:
+        scoped=dict(expected or {})
+        if not profile_supports_work_order_field(self.profile, "sn"):
+            scoped["sn_range_enabled"] = False
+        if not profile_supports_work_order_field(self.profile, "mac"):
+            scoped["mac_range_enabled"] = False
+            scoped["mac_step_enabled"] = False
+        return scoped
+
     def _required_items(self):
         items = list(self.profile.get("live", {}).get("required_items", []) or [])
-        expected=dict(getattr(self,"_active_expected",{}) or {})
+        expected=self._scope_expected_work_order(getattr(self,"_active_expected",{}) or {})
         if expected.get("sn_range_enabled"):
             items.append("Work Order: S/N Range")
         if expected.get("mac_range_enabled"):
@@ -1044,7 +1089,7 @@ class MultiImageInspectionEngine:
                       cancel_event=None, target_items=None) -> MultiImageResult:
         if not image_paths:
             raise ValueError("No images selected")
-        expected = dict(expected or {})
+        expected = self._scope_expected_work_order(dict(expected or {}))
         self._active_expected = dict(expected)
         started = datetime.now()
         sid = previous_session.session_id if previous_session else f"{started:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
@@ -1323,7 +1368,7 @@ class MultiImageInspectionEngine:
         warn = wb.add_format({"border": 1, "bg_color": "#FFF2CC", "font_color": "#7F6000", "bold": True})
         ws = wb.add_worksheet("Summary")
         rows = [
-            ("Overall", result.overall), ("Automatic Overall", result.automatic_overall or result.overall),
+            ("Final Result", result.overall), ("Auto Result Before Manual Review", result.automatic_overall or result.overall),
             ("Manual Overrides", len(result.manual_overrides)), ("Manual Review Actions", len(result.manual_reviews)), ("Inspection Mode", "GUIDED_MULTI_IMAGE"),
             ("Recommended Capture", "Full Label + Basic + WiFi + Identity + Compliance"),
             ("Profile", self.profile.get("profile_name", "")), ("Model", self.profile.get("model", "")),
@@ -1348,7 +1393,7 @@ class MultiImageInspectionEngine:
         ws.set_column(0, 0, 24); ws.set_column(1, 1, 100)
         for r, (k, v) in enumerate(rows):
             ws.write(r, 0, k, h)
-            fmt = good if k == "Overall" and result.overall == "PASS" else bad if k == "Overall" and result.overall in ("FAIL", "IDENTITY_MISMATCH", "CONFLICT") else warn if k == "Overall" else c
+            fmt = good if k == "Final Result" and result.overall in ("PASS", "PASS_WITH_MANUAL_REVIEW") else bad if k == "Final Result" and result.overall in ("FAIL", "IDENTITY_MISMATCH", "CONFLICT") else warn if k == "Final Result" else c
             ws.write(r, 1, str(v), fmt)
 
         out = wb.add_worksheet("Inspection_Result")

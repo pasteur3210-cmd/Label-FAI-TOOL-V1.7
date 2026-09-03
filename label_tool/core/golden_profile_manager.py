@@ -31,7 +31,7 @@ def _safe_name(text: str) -> str:
 
 def _candidate_label_type(source_name: str, text: str, fallback: str='') -> str:
     low=(str(source_name or '')+' '+str(text or '')[:1600]).lower()
-    # V1.9.23: label family belongs in Label Type, never in Internal Model.
+    # V1.9.24: label family belongs in Label Type, never in Internal Model.
     # Support common controlled-form wording and legacy filename typo "Caron".
     if 'inner box' in low or 'inner_box' in low:
         return 'Inner Box Label'
@@ -232,7 +232,7 @@ def _candidate_model(text: str, fallback: str='') -> str:
 
 def _candidate_label_pn(text: str, fallback: str='') -> str:
     t=str(text or '').replace('：',':')
-    # V1.9.23: a controlled form may list the blank-stock P/N before the
+    # V1.9.24: a controlled form may list the blank-stock P/N before the
     # finished printed-label P/N.  The blank material number is NOT Label P/N.
     # Prefer the explicit shipped/finished label family first and deliberately
     # exclude lines beginning with "Blank Label Part Number".
@@ -1147,7 +1147,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     source_sha=_sha256(source)
     profile.update({
         'profile_name':base_name,
-        'profile_version':'1.9.23',
+        'profile_version':'1.9.24',
         'profile_status':'DRAFT',
         'dynamic_profile':True,
         'model':identity['model'],
@@ -1236,7 +1236,7 @@ def build_dynamic_profile(source_path: str, base_profile: dict, profile_name: st
     profile['dynamic_standard_items']=[]
     profile=apply_editable_items(profile,rows)
     profile['golden_item_bindings']=_build_golden_item_bindings(profile)
-    profile['runtime_form_driven_version']='1.9.23'
+    profile['runtime_form_driven_version']='1.9.24'
     profile['golden_scope']=scope_meta
     profile['golden_completeness']={
         'document_item_count':len(form_items),
@@ -1339,7 +1339,7 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
     """
     if not profile.get('dynamic_profile') or not (profile.get('golden_form_items') or []):
         return profile,False,[]
-    if str(profile.get('runtime_form_driven_version','')) in ('1.9.22','1.9.23') and profile.get('golden_item_bindings'):
+    if str(profile.get('runtime_form_driven_version','')) in ('1.9.22','1.9.24') and profile.get('golden_item_bindings'):
         return profile,False,[]
     before=deepcopy(profile)
     rows=_dynamic_item_rows(profile)
@@ -1372,8 +1372,8 @@ def normalize_dynamic_profile_for_runtime(profile: dict) -> tuple[dict,bool,list
         })
     cleaned=apply_editable_items(profile,rows)
     cleaned['golden_scope']=scope_meta
-    cleaned['profile_version']='1.9.23'
-    cleaned['runtime_form_driven_version']='1.9.23'
+    cleaned['profile_version']='1.9.24'
+    cleaned['runtime_form_driven_version']='1.9.24'
     cleaned['golden_item_bindings']=_build_golden_item_bindings(cleaned)
     # Runtime-rule migration for already-imported external profiles.  V1.9.16
     # could persist password_length=0 because Password: Random N characters was
@@ -1503,7 +1503,7 @@ def save_profile_identity_edits(path: Path, profile: dict, model: str, label_typ
     identity=canonical_profile_identity(model,label_type,label_pn)
     new=deepcopy(profile)
     new['model']=identity['model']; new['label_type']=identity['label_type']; new['label_pn']=identity['label_pn']
-    new['profile_name']=identity['display_name']; new['profile_version']='1.9.23'; new['profile_status']='DRAFT'
+    new['profile_name']=identity['display_name']; new['profile_version']='1.9.24'; new['profile_status']='DRAFT'
     sha=str((new.get('golden_import') or {}).get('source_sha256',''))
     new['profile_identity']={**identity,'source_sha256':sha}
     ff=new.setdefault('fixed_fields',{})
