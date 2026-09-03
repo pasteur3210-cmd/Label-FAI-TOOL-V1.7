@@ -394,7 +394,7 @@ class App(tk.Tk):
                 # Advanced JSON is authoritative only if that tab is selected.
                 if nb.select()==str(advanced_tab):
                     working=json.loads(text.get('1.0','end-1c'))
-                working['profile_version']='1.9.22'
+                working['profile_version']='1.9.23'
                 working['profile_status']='DRAFT'
                 errs=validate_profile_structure(working,pathlib.Path(path))
                 if errs:
@@ -605,12 +605,12 @@ class App(tk.Tk):
         self.image_cancel_btn=ttk.Button(top,text="Cancel",command=self.cancel_image_inspection,state="disabled"); self.image_cancel_btn.grid(row=0,column=8,padx=4)
         ttk.Label(top,textvariable=self.image_batch_var,font=("Segoe UI",10,"bold")).grid(row=1,column=0,columnspan=9,sticky="w",pady=(5,0))
         ttk.Label(top,textvariable=self.image_progress_var).grid(row=2,column=0,columnspan=9,sticky="w",pady=(2,0))
-        ttk.Label(top,text="V1.9.22 Scope hardening + traceable record naming: shipped-label-only QR filtering retained; record folders/files include Model, Label Type and Label P/N.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
+        ttk.Label(top,text="V1.9.23 Carton identity + operator UI: finished Label P/N priority, Model/Label Type separation, compact result area and enlarged Manual Review comparison text.",foreground="#555555").grid(row=3,column=0,columnspan=9,sticky="w",pady=(2,0))
         top.columnconfigure(1,weight=1)
         main=ttk.Panedwindow(self.image_tab,orient="horizontal"); main.pack(fill="both",expand=True,padx=8,pady=4)
         left=ttk.Frame(main); right=ttk.Frame(main); main.add(left,weight=3); main.add(right,weight=5)
         self.image_preview=ttk.Label(left,anchor="center",relief="sunken",text="Load one or more label photos"); self.image_preview.pack(fill="both",expand=True)
-        self.image_overall=tk.Label(right,text="--",font=("Segoe UI",26,"bold")); self.image_overall.pack(fill="x")
+        self.image_overall=tk.Label(right,text="--",font=("Segoe UI",20,"bold")); self.image_overall.pack(fill="x",pady=(0,2))
 
         # V1.8.1 UI: keep Manual Review above the expandable result table.
         # On shorter screens the old layout let the Treeview consume the
@@ -618,11 +618,11 @@ class App(tk.Tk):
         # area.  Packing this fixed-height operator panel first guarantees that
         # PASS/refresh controls remain reachable at all supported resolutions.
         manual=ttk.LabelFrame(right,text="Manual Review / 人工目檢輔助",padding=6)
-        manual.pack(fill="x",pady=(2,6))
-        ttk.Label(manual,text="All non-PASS items are listed here. Visual/Golden items can be manually overridden after Golden comparison; identity/barcode/consistency items are REVIEW-ONLY and remain traceable.",wraplength=980).grid(row=0,column=0,columnspan=5,sticky="w")
+        manual.pack(fill="x",pady=(1,3))
+        ttk.Label(manual,text="All non-PASS items are listed here. Visual/Golden items can be manually overridden after Golden comparison; identity/barcode/consistency items are REVIEW-ONLY and remain traceable.",wraplength=980,font=("Segoe UI",9)).grid(row=0,column=0,columnspan=5,sticky="w")
         list_frame=ttk.Frame(manual)
-        list_frame.grid(row=1,column=0,columnspan=5,sticky="ew",pady=4)
-        self.image_manual_list=tk.Listbox(list_frame,selectmode="browse",height=4,exportselection=False)
+        list_frame.grid(row=1,column=0,columnspan=5,sticky="ew",pady=2)
+        self.image_manual_list=tk.Listbox(list_frame,selectmode="browse",height=2,exportselection=False)
         manual_scroll=ttk.Scrollbar(list_frame,orient="vertical",command=self.image_manual_list.yview)
         self.image_manual_list.configure(yscrollcommand=manual_scroll.set)
         self.image_manual_list.pack(side="left",fill="x",expand=True)
@@ -640,7 +640,7 @@ class App(tk.Tk):
         results=ttk.Frame(right)
         results.pack(fill="both",expand=True)
         cols=("item","result","actual","expected","source","quality","message")
-        self.image_tree=ttk.Treeview(results,columns=cols,show="headings",height=18)
+        self.image_tree=ttk.Treeview(results,columns=cols,show="headings",height=8)
         widths={"item":270,"result":120,"actual":190,"expected":210,"source":190,"quality":90,"message":320}
         for c in cols:
             self.image_tree.heading(c,text=c.title()); self.image_tree.column(c,width=widths[c],anchor="w")
@@ -2626,14 +2626,19 @@ class App(tk.Tk):
         win.minsize(min(980,target_w), min(620,target_h))
 
         top=ttk.Frame(win,padding=(8,6)); top.pack(fill='x')
-        ttk.Label(top,text=f'Inspection Item: {item}',font=('Segoe UI',11,'bold')).pack(anchor='w')
+        ttk.Label(top,text=f'Inspection Item: {item}',font=('Segoe UI',19,'bold')).pack(anchor='w',pady=(0,2))
         ev=self.multi_image_result.evidence.get(item) if self.multi_image_result else None
         auto='CONFLICT' if (self.multi_image_result and item in self.multi_image_result.conflicts) else (ev.result if ev else 'NEED_MORE_IMAGE')
         actual=(ev.actual if ev else '')
         expected=(ev.expected if ev else '')
-        ttk.Label(top,text=f"Mode: {mode}   |   Automatic: {auto}",foreground=('#8A5A00' if mode=='REVIEW_ONLY' else '#006400')).pack(anchor='w',pady=(2,0))
-        ttk.Label(top,text=f"Actual: {actual or '-'}   |   Expected: {expected or '-'}",foreground='#444',wraplength=max(760,target_w-50)).pack(anchor='w',pady=(1,0))
-        ttk.Label(top,text=f"Reason: {(ev.message if ev else 'No usable evidence')}",foreground='#555',wraplength=max(760,target_w-50)).pack(anchor='w',pady=(1,0))
+        ttk.Label(top,text=f"Mode: {mode}   |   Automatic: {auto}",font=('Segoe UI',10),foreground=('#8A5A00' if mode=='REVIEW_ONLY' else '#006400')).pack(anchor='w',pady=(1,1))
+        compare=ttk.Frame(top); compare.pack(fill='x',pady=(1,2))
+        compare.columnconfigure(1,weight=1); compare.columnconfigure(3,weight=1)
+        ttk.Label(compare,text='ACTUAL / 實拍：',font=('Segoe UI',12,'bold')).grid(row=0,column=0,sticky='nw',padx=(0,5))
+        ttk.Label(compare,text=(actual or '-'),font=('Segoe UI',16,'bold'),wraplength=max(300,(target_w-220)//2),justify='left').grid(row=0,column=1,sticky='nw',padx=(0,14))
+        ttk.Label(compare,text='EXPECTED / Golden：',font=('Segoe UI',12,'bold')).grid(row=0,column=2,sticky='nw',padx=(0,5))
+        ttk.Label(compare,text=(expected or '-'),font=('Segoe UI',16,'bold'),wraplength=max(300,(target_w-220)//2),justify='left').grid(row=0,column=3,sticky='nw')
+        ttk.Label(top,text=f"Reason: {(ev.message if ev else 'No usable evidence')}",font=('Segoe UI',10),foreground='#555',wraplength=max(760,target_w-50)).pack(anchor='w',pady=(1,0))
         if mode=='REVIEW_ONLY':
             ttk.Label(top,text='此項可人工確認；Automatic Result 會保留於報告與 Log，不會被人工結果覆蓋。',foreground='#8A5A00').pack(anchor='w',pady=(3,0))
 
@@ -2708,7 +2713,7 @@ class App(tk.Tk):
         spec_box=ttk.LabelFrame(right,text='Golden Item Specification / Golden 項目說明',padding=(6,4))
         spec_box.pack(fill='x',pady=(0,5))
         spec_text=self._golden_item_specification(item)
-        ttk.Label(spec_box,text=spec_text,wraplength=max_img_w-30,justify='left',foreground='#333').pack(fill='x',anchor='w')
+        ttk.Label(spec_box,text=spec_text,font=('Segoe UI',14,'bold'),wraplength=max_img_w-30,justify='left',foreground='#222').pack(fill='x',anchor='w')
         golden_view=ttk.Frame(right); golden_view.pack(fill='both',expand=True)
 
         view_state=tk.StringVar(value='Full Golden / 完整Golden')
@@ -2906,7 +2911,7 @@ class App(tk.Tk):
             messagebox.showwarning('Force Re-analyze','Load one or more label images first.'); return
         if not messagebox.askyesno(
             'Force Re-analyze All',
-            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.22 session cache and is intended for engineering verification.'
+            'Re-analyze ALL loaded images from scratch?\n\nThis bypasses the V1.9.23 session cache and is intended for engineering verification.'
         ):
             return
         # New session deliberately discards prior automatic/manual decisions.
