@@ -1,4 +1,13 @@
-# Label Auto Inspection Tool V1.9.22
+# Label Auto Inspection Tool V1.9.23
+
+## V1.9.23 Carton Identity + Operator UI
+
+- Carton Request Forms now resolve the **finished printed label P/N**, not the blank stock P/N. For the supplied GRG-4297u Carton form: `Blank Label Part Number = 502109-020` is excluded and `Carton Label Part Number = 680010-354` is used as Label P/N.
+- `Carton Label Request Form` is detected as `Label Type = Carton Label`.
+- Internal Model and Label Type are kept separate. If metadata is accidentally entered as `GRG-4297u Carton` while Label Type is `Carton Label`, the canonical identity normalizes Internal Model to `GRG-4297u`.
+- Image inspection UI is more compact so the bottom Inspection Item table retains visible working area: Overall status font reduced, Manual Review list height reduced, and panel spacing tightened.
+- Manual Review makes operator decision data visually dominant: Inspection Item 19 pt, Actual/Expected 16 pt, Golden Item Specification 14 pt; Mode/Reason remain secondary.
+- Release naming is simplified: program folder / ZIP / GitHub artifact use only program name + version. Change descriptions live in Markdown.
 
 ## V1.9.22 Record Path-Length Hardening
 
@@ -115,11 +124,13 @@ This release keeps the validated automatic CAM/Image decision rules intact while
 Automatic OCR, barcode, artwork, evidence fusion, incremental cache and automatic PASS/FAIL behavior remain covered by the existing regression suite. V1.9.18 adds dedicated tests for all-non-PASS operator attention, review-only protection, stale Golden asset removal, and Profile/Golden session invalidation.
 
 GitHub Actions uses Python 3.11, workspace cleanup, release gate, end-to-end integration gate, Ruff F821, compile check, unit tests, PyInstaller build, and packaged EXE OCR/Artwork/Multi-image smoke tests.
-## V1.9.22 Verification
-- pytest: 303 passed / 0 failed
-- unittest: 197 tests / OK
+## V1.9.23 Verification
+- pytest: 311 passed / 0 failed
+- unittest: 202 tests / OK
+- New V1.9.23 Carton/UI regression: 5 tests / OK
 - Python 3.11 grammar/compile: PASS
 - Integration Gate: PASS
-- Release Gate: PASS
-- Clean package cache/build artifacts: 0
-- GitHub Actions continues to enforce Ruff F821 + Windows PyInstaller/packaged EXE smoke tests.
+- Release Gate: PASS (`version=1.9.23`, `python311_files=105`)
+- Clean package cache/build artifacts: 0 after final cleanup
+- Local Ruff F821 could not be executed in this offline Linux environment because Ruff is not installed; the GitHub Actions workflow installs Ruff and keeps the mandatory F821 gate before Windows build.
+- GitHub Actions continues to enforce Windows PyInstaller + packaged EXE OCR/Artwork/Multi-image smoke tests.
